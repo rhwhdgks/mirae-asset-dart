@@ -1,0 +1,28 @@
+# 검수·재현용 고정 의존성. 최종 발행 수치와 PASS는 FINAL_BUILD 실행 결과를 따른다.
+# Python 3.14+ (운영 서버·로컬 기준).
+#
+#   python3.14 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#   PYTHONPATH=. .venv/bin/python -m tests.run_all            # 최소 반례 42모듈
+#   PYTHONPATH=. .venv/bin/python -m tests.run_all --loaded   # + 적재 검증 15모듈
+#   VERIFY_FULL=1 PYTHONPATH=. .venv/bin/python -m tests.run_all --loaded   # Fact 원문 왕복 전량
+#
+# `--loaded`는 out/canonical/의 Parquet와 원문 왕복용 data/corpus가 필요하다. 정본이 없으면
+# 아래 네 상류 stage를 모두 재생성한 뒤 canonical을 빌드한다. src/ingest 또는 manifest 입력이
+# 바뀌었는데 일부 stage만 재사용하면 stamp는 유효한 정본을 보장하지 않는다.
+#   PYTHONPATH=. .venv/bin/python -m src.ingest.exchange_events
+#   PYTHONPATH=. .venv/bin/python -m src.ingest.form_events
+#   PYTHONPATH=. .venv/bin/python -m src.ingest.periodic_relations
+#   PYTHONPATH=. .venv/bin/python -m src.ingest.correction_items
+#   PYTHONPATH=. .venv/bin/python -m src.canonical.build
+pyarrow==25.0.0
+lxml==6.1.1
+pypdf==6.15.0
+tiktoken==0.13.0
+pydantic==2.13.4
+kiwipiepy==0.23.2
+httpx==0.28.1
+python-dotenv==1.2.2
+fastapi==0.139.2
+uvicorn==0.51.0
+pytest==9.1.1

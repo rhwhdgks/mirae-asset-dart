@@ -1,0 +1,1 @@
+{"additionalProperties":false,"properties":{"item_id":{"enum":["item-1","item-2"],"title":"Item Id","type":"string"},"reason":{"enum":["future_forecast","investment_advice"],"title":"Reason","type":"string"}},"required":["reason","item_id"],"title":"TerminalReasonBinding","type":"object"}

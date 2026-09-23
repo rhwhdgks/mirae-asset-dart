@@ -1,0 +1,173 @@
+# 승인 구어 질문 패턴. 원래 scripts/build_concept_question_patterns.py 생성물이었으나
+# 생성기가 저장소에 없다(2026-09-02 확인). 이 파일을 직접 편집하고
+# tests/test_concept_question_patterns.py 로 판정 기준선을 지킨다.
+#
+# mode  AUTO 표기만으로 확정 · CONTEXT 필요 단서 있고 금지 단서 없을 때만
+#       CLARIFY 후보 둘 이상 역질문 · ROUTE_CLARIFY route 부터 확인
+#       BLOCK 의미는 알지만 지원 밖
+# 금지 단서가 필요 단서를 이긴다. 긴 표기가 짧은 표기보다 먼저 잡힌다.
+#
+# 기각된 표기(넣지 않는 이유):
+#   얼마나팔 — 활용어미 절단형. 사람의 질문이 아니라 형태 정규화의 몫
+#   매출총이익률계산용원가 — 초안 생성 과정에서 만들어진 합성 표기. 실사용 구어가 아니다
+#   덩치 — 자산·매출·시가총액·기업규모를 모두 뜻한다
+#   채무 — 차입금·매입채무·기타채무를 포함해 total_liabilities 별칭으로 부적절
+#   무형자산 — 이미 정본 사전에 있다 (NOOP)
+#   eps — 이미 정본 사전에 있다 (NOOP)
+#
+# 9열 fanout(선택) — CLARIFY 후보를 묻지 않고 전부 답한다. 생략하면 꺼짐.
+# pattern_id	surface	mode	candidates	required_cues	forbidden_cues	question_kind	note	fanout
+revenue_explicit_sales	판매액	AUTO	revenue	-	-	revenue	금액 단서가 표기에 포함된 판매 매출
+revenue_maesang	매상	AUTO	revenue	-	-	revenue	매출의 통용 구어
+revenue_scale	매출규모	AUTO	revenue	-	-	revenue	명시적 매출 표현
+revenue_topline_ko	탑라인	AUTO	revenue	-	-	revenue	재무 문맥의 top line
+revenue_topline_en	topline	AUTO	revenue	-	-	revenue	탑라인과 동일
+revenue_sales_record	판매실적	CONTEXT	revenue	얼마|얼마나|금액|규모|액수	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	revenue	금액 단서가 있을 때만. 수량 질문은 지원 밖
+revenue_sold_amount	팔았어	CONTEXT	revenue	얼마|얼마나|금액|규모|액수	설비|공장|기계|기계장치|유형자산|무형자산|토지|건물|부동산|사업부|사업|지분|회사|자회사|주식|몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량|얼마에|가격에|매각가|처분가	revenue	금액을 묻는 판매. 대상 명사·수량·가격 단서가 있으면 적용하지 않는다
+revenue_sold_amount_na	팔았나	CONTEXT	revenue	얼마|얼마나|금액|규모|액수	설비|공장|기계|기계장치|유형자산|무형자산|토지|건물|부동산|사업부|사업|지분|회사|자회사|주식|몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량|얼마에|가격에|매각가|처분가	revenue	팔았어와 동일
+revenue_sold_amount_go	팔았고	CONTEXT	revenue	얼마|얼마나|금액|규모|액수	설비|공장|기계|기계장치|유형자산|무형자산|토지|건물|부동산|사업부|사업|지분|회사|자회사|주식|몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량|얼마에|가격에|매각가|처분가	revenue	연결어미형. 활용은 표기로 담고 절단형은 만들지 않는다
+sold_route	팔았어	ROUTE_CLARIFY	revenue|disposal_ppe|disposal_intangible	-	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량|설비|공장|기계|기계장치|유형자산|무형자산|토지|건물|부동산|사업부|사업|지분|회사|자회사|주식	revenue	단서가 없으면 판매·처분·매각 중 무엇인지 route 부터 확인한다
+sold_route_na	팔았나	ROUTE_CLARIFY	revenue|disposal_ppe|disposal_intangible	-	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량|설비|공장|기계|기계장치|유형자산|무형자산|토지|건물|부동산|사업부|사업|지분|회사|자회사|주식	revenue	팔았어와 동일
+profit_earned	벌었어	CLARIFY	revenue|operating_income|net_income	-	-	profit-stage	매출·영업이익·순이익 단계가 구분되지 않는다	fanout
+profit_earned_na	벌었나	CLARIFY	revenue|operating_income|net_income	-	-	profit-stage	벌었어와 동일	fanout
+profit_earned_money	번돈	CLARIFY	revenue|operating_income|net_income	-	-	profit-stage	벌었어와 동일	fanout
+profit_made	이익났어	CLARIFY	gross_profit|operating_income|net_income	-	-	profit-stage	매출총이익·영업이익·순이익 중 어느 단계인지 확인한다
+profit_left	남겼어	CLARIFY	operating_income|net_income	-	-	profit-stage	남기다 = 이익. 단계 미지정
+profit_operating_short	영업익	AUTO	operating_income	-	-	profit-stage	영업이익의 확립된 약칭
+profit_operating_core	본업이익	CONTEXT	operating_income	본업|영업	-	profit-stage	본업·영업 문맥에서 직접 해소
+profit_net_short	순익	AUTO	net_income	-	-	profit-stage	순이익의 확립된 약칭
+profit_net_final	최종이익	CONTEXT	net_income	최종|당기|순	-	profit-stage	손익 최종 단계 문맥
+profit_pretax_full	세전이익	AUTO	pretax_income	-	-	profit-stage	명시적 세전 이익
+profit_pretax_short	세전	CONTEXT	pretax_income	이익|손익|벌었	-	profit-stage	이익·손익 표현과 결합할 때만
+cost_of_sales_word	원가	CONTEXT	cost_of_sales	매출|판매|제품|상품	-	profit-stage	매출·판매·제품 단서가 있을 때만. 그 외 비용과 혼동
+sganda_short	판관비	AUTO	sganda	-	-	profit-stage	판매비와관리비의 약칭
+sganda_long	판매관리비	AUTO	sganda	-	-	profit-stage	정본에 가까운 통용 표현
+equity_method	지분법	CONTEXT	equity_method_income	이익|손익|금액|얼마	-	profit-stage	금액 질문일 때. 회계처리 방식 자체 질문은 제외
+interest_paid_cash_ctx	이자	CONTEXT	interest_paid	현금으로|실제로|실제|현금기준|납부|지급했|수취했	받|수취|수익|아니라|말고|대신	flow	이자 + 실제 지급/현금 → 현금흐름. 부정어가 있으면 물러난다
+interest_recv_cash_ctx	이자	CONTEXT	interest_received	받|수취	냈|낸|지급|비용	flow	이자 + 실제 수취 → 현금흐름
+interest_expense_ctx	이자	CONTEXT	interest_expense	비용|손익|계상|장부	받|수취|수익	profit-stage	이자 + 비용/손익 → 손익 이자비용
+interest_income_ctx	이자	CONTEXT	interest_income	수익	냈|낸|지급|비용|현금으로|실제	profit-stage	이자 + 수익 → 손익 이자수익
+interest_bare	이자	CLARIFY	interest_income|interest_expense|interest_received|interest_paid	-	-	flow	방향(받음/냄)과 손익/현금 기준이 모두 빠져 있다
+interest_paid_pl	이자비용	AUTO	interest_expense	-	-	profit-stage	손익 이자비용 — 명시적
+interest_income_pl	이자수익	AUTO	interest_income	-	-	profit-stage	손익 이자수익 — 명시적
+interest_paid_cash	이자낸돈	CLARIFY	interest_expense|interest_paid	-	-	flow	손익 비용인지 실제 현금 지급인지 확인한다
+interest_recv_cash	이자받은돈	CLARIFY	interest_income|interest_received	-	-	flow	손익 수익인지 실제 현금 수취인지 확인한다
+tax_paid_cash	세금	BLOCK	-	냈|낸|납부|납세	-	unsupported	현금 법인세 납부액 개념이 56종에 없다 (검수서 §3-5)
+current_tax_liab_due	세금	CONTEXT	current_tax_liabilities	내야|미납|아직안낸|낼세금	-	balance	아직 내야 할 세금 → 당기법인세부채. 납부 행위가 아니라 잔액이다
+current_tax_asset_refund	세금	CONTEXT	current_tax_assets	돌려받|환급	-	balance	돌려받을 세금 → 당기법인세자산. 납부 행위가 아니라 잔액이다
+tax_bare	세금	CLARIFY	income_tax|current_tax_assets|current_tax_liabilities	-	-	profit-stage	비용·환급·미지급이 갈린다
+pretax_stage_ctx	법인세	CONTEXT	pretax_income	차감전|전단계|반영전|공제전|넣기전	-	profit-stage	「법인세 반영 직전 단계의 손익」은 세금 계정이 아니라 세전손익이다
+income_tax_pl_ctx	법인세	CONTEXT	income_tax	인식|계상|손익에|비용으로	-	profit-stage	손익에 **인식**한 법인세 → 법인세비용. 실제 납부액과 다르다
+net_income_final_ctx	세금	CONTEXT	net_income	최종손익|최종이익|모두반영|다반영|최종적	-	profit-stage	「세금까지 모두 반영한 최종 손익」은 당기순손익이다
+tax_corporate	법인세	CLARIFY	income_tax|current_tax_assets|current_tax_liabilities	-	-	profit-stage	비용·낼 세금·돌려받을 세금이 갈린다
+assets_total_word	자산	CONTEXT	total_assets	전체|총|합계|총계	유동|비유동|무형|유형|사용권|투자부동산|세금|세법|리스	balance	총계 질문일 때만. 유동·무형 등은 정본 표기가 먼저 잡는다
+liabilities_bare	빚	CLARIFY	total_liabilities|current_liabilities|non_current_liabilities	-	-	balance	부채총계와 차입금은 다르다. 조용히 total_liabilities 로 고정하지 않는다	fanout
+liabilities_word	부채	CONTEXT	total_liabilities	전체|총|합계|총계	유동|비유동|충당|이연|당기법인세|세금|세법	balance	수식어 없는 총계 질문일 때. 긴 정본 표기가 먼저 잡힌다
+equity_bare	자본	CLARIFY	total_equity|share_capital	-	잉여|조달|적정성	balance	자본총계와 자본금을 구분한다
+equity_own	자기자본	AUTO	total_equity	-	-	balance	자본총계의 통용 표현
+equity_net_assets	순자산	AUTO	total_equity	-	-	balance	자본총계와 대응
+cash_change_ctx	현금	CONTEXT	net_change_in_cash	증감|순증감|변동|늘었|줄었|증가|감소	이자|배당|세금	flow	현금 + 증감 → 순증감
+cash_operating_ctx	현금	CONTEXT	cf_operating	영업으로|영업활동|영업에서|본업	이자|배당|세금	flow	현금 + 영업 → 영업활동현금흐름
+cash_hold_ctx	현금	CONTEXT	cash_and_equivalents	잔고|잔액|보유|있어|있나|들고|가지고|남아	이자|배당|세금|넘기고|처분|매각|팔고	balance	현금 + 보유/잔액 → 잔액. 처분 수식이 있으면 물러난다
+cash_bare	현금	CLARIFY	cash_and_equivalents|net_change_in_cash|cf_operating	-	이자|배당|세금|취득|들이|도입|넘기고|처분|매각	balance	잔액·순증감·영업현금흐름을 구분한다. 이자·배당·세금 문맥은 그쪽 패턴이 받는다
+cash_held	보유현금	AUTO	cash_and_equivalents	-	-	balance	잔액 의미가 명시적
+cash_equivalents	현금성자산	AUTO	cash_and_equivalents	-	순변동|증감|변동|순증감	balance	정본의 통용 축약
+cash_balance_ctx	현금잔고	AUTO	cash_and_equivalents	-	-	balance	잔액을 명시한 표현
+inventory_word	재고	AUTO	inventories	-	-	balance	재고자산의 자연어 표현
+receivable_credit	외상	CLARIFY	trade_receivables|trade_and_other_receivables	-	-	balance	매출채권만인지 기타채권까지인지 확인한다
+receivable_to_get	받을돈	CLARIFY	trade_receivables|trade_and_other_receivables	-	-	balance	받을 돈의 범위가 불명확하다
+retained_reserve	유보금	CONTEXT	retained_earnings	쌓|이익|회사에	-	balance	회사에 쌓인 이익 문맥에서. 세무상 유보와 혼동 가능
+surplus_bare	잉여금	CLARIFY	retained_earnings|share_premium	-	-	balance	이익잉여금과 자본잉여금을 구분한다
+property_word	부동산	CLARIFY	investment_property|ppe	-	-	balance	임대·투자 목적과 영업용 유형자산을 구분한다
+rou_asset	리스자산	AUTO	right_of_use_assets	-	-	balance	사용권자산의 통용 표현
+facility_sold	설비	CONTEXT	disposal_ppe	팔았|팔아|처분|매각	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	disposal	설비 + 팔다/처분 → 유형자산 처분액
+facility_bought	설비	CONTEXT	capex_ppe	샀|사는|사들|취득|매입|투자	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량|사고팔|순액	acquisition	설비 + 사다/취득 → 유형자산 취득액. 사고팔며 순액은 투자활동이다
+facility_balance	설비	CONTEXT	ppe	잔고|잔액|보유|가지고|남아|들고|장부가|장부금액	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	balance	설비 + 보유/잔액 → 유형자산 잔액
+facility_bare	설비	CLARIFY	ppe|capex_ppe|disposal_ppe	-	-	balance	동사 단서가 없으면 잔액·취득·처분을 묻는다
+factory_sold	공장	CONTEXT	disposal_ppe	팔았|팔아|처분|매각	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	disposal	설비와 동일
+factory_bought	공장	CONTEXT	capex_ppe	샀|사는|사들|취득|매입|투자	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	acquisition	설비와 동일
+factory_balance	공장	CONTEXT	ppe	잔고|잔액|보유|가지고|남아|들고|장부가|장부금액	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	balance	설비와 동일
+factory_bare	공장	CLARIFY	ppe|capex_ppe|disposal_ppe	-	-	balance	설비와 동일
+facility_capex	설비투자	CONTEXT	capex_ppe	얼마|얼마나|금액|규모|액수|썼|투자	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	acquisition	기간 중 유형자산 취득액을 묻는 문맥
+facility_disposal	설비팔았어	CONTEXT	disposal_ppe	얼마|얼마나|금액|규모|액수	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	disposal	설비를 팔아 들어온 처분액
+factory_disposal	공장팔았어	CONTEXT	disposal_ppe	얼마|얼마나|금액|규모|액수	몇개|몇대|몇톤|몇장|수량|대수|판매량|출하량	disposal	설비팔았어와 동일
+facility_held	설비보유	CONTEXT	ppe	잔고|잔액|보유|가지고|남아|들고|장부가|장부금액|얼마|장부	-	balance	유형자산 잔액
+cf_operating_full	영업현금흐름	AUTO	cf_operating	-	-	flow	명시적 영업활동 현금흐름
+cf_operating_short	영업cf	AUTO	cf_operating	-	-	flow	통용 약칭
+cf_investing_full	투자현금흐름	AUTO	cf_investing	-	-	flow	명시적 투자활동 현금흐름
+cf_investing_short	투자cf	AUTO	cf_investing	-	-	flow	통용 약칭
+cf_financing_full	재무현금흐름	AUTO	cf_financing	-	-	flow	명시적 재무활동 현금흐름
+cf_financing_short	재무cf	AUTO	cf_financing	-	-	flow	통용 약칭
+cash_change	현금증감	AUTO	net_change_in_cash	-	-	flow	현금및현금성자산 순증감
+capex_en	capex	CLARIFY	capex_ppe|capex_intangible	-	-	acquisition	유형·무형 취득액을 구분한다
+capex_ko	캐펙스	CLARIFY	capex_ppe|capex_intangible	-	-	acquisition	capex 와 동일
+invest_bare	투자	ROUTE_CLARIFY	capex_ppe|capex_intangible|cf_investing	-	-	acquisition	설비·무형 취득, 투자활동현금흐름, 지분·회사 인수 공시가 모두 가능하다
+disposal_bare	처분	ROUTE_CLARIFY	disposal_ppe|disposal_intangible	-	-	disposal	유형·무형 처분액인지 사업·지분 매각 공시인지 구분한다
+dividend_bare	배당	ROUTE_CLARIFY	dividends_paid	-	-	flow	현금 지급액·주당배당금·배당결정 공시가 갈린다. 주당배당은 지원 밖
+dividend_money	배당금	ROUTE_CLARIFY	dividends_paid	-	-	flow	배당과 동일
+eps_ko	주당이익	AUTO	eps	-	희석|잠재적	profit-stage	기본 주당이익
+eps_diluted_en	희석eps	AUTO	diluted_eps	-	-	profit-stage	희석 주당이익
+eps_diluted_ko	희석주당	CONTEXT	diluted_eps	이익|eps|손익	-	profit-stage	이익·EPS 단서와 결합할 때
+oci_bare	포괄손익	CLARIFY	total_comprehensive_income|other_comprehensive_income	-	누계|누적|쌓	profit-stage	총포괄손익과 기타포괄손익을 구분한다. 누계 단서는 aoci 패턴이 받는다
+oci_accumulated	누적포괄손익	AUTO	aoci	-	-	balance	자본에 누적된 기타포괄손익
+oci_en_accumulated	oci	CONTEXT	aoci	누적|누계|쌓	-	balance	OCI + 누적 → 자본 누계액
+oci_en_period	oci	CONTEXT	other_comprehensive_income	당기|이번|올해	누적|누계|쌓	profit-stage	OCI + 당기 → 기타포괄손익
+oci_en_bare	oci	CLARIFY	total_comprehensive_income|other_comprehensive_income|aoci	-	-	profit-stage	총·기타·누계 중 무엇인지 확인한다
+cash_opening_held	기초현금	BLOCK	-	-	-	unsupported	기초·기말이 같은 기간 좌표로 적재돼 시점을 구분할 수 없다 (전처리 수정 대상)
+cash_closing_held	기말현금	BLOCK	-	-	-	unsupported	기초현금과 같은 이유
+nci_held	비지배지분	BLOCK	-	-	-	unsupported	자본 잔액과 이익 귀속액이 한 ID에 섞여 있다. 정본 분리가 먼저다
+owners_held	지배기업소유주	BLOCK	-	-	-	unsupported	비지배지분과 같은 이유
+units_sold	몇개팔았어	BLOCK	-	-	-	unsupported	수량 지표가 56종에 없다. 매출은 금액이다
+units_volume	판매량	BLOCK	-	-	-	unsupported	수량 지표가 56종에 없다 (검수서 §3-5)
+units_shipment	출하량	BLOCK	-	-	-	unsupported	판매량과 같은 이유
+borrowings	차입금	BLOCK	-	-	-	unsupported	차입금 개념이 56종에 없다. 총부채와 다르다
+bonds	사채	BLOCK	-	-	-	unsupported	차입금과 같은 이유
+net_debt	순차입금	BLOCK	-	-	-	unsupported	차입금 개념 부족
+ebitda	ebitda	BLOCK	-	-	-	unsupported	감가상각비·무형자산상각비가 56종에 없다
+dps	주당배당금	BLOCK	-	-	-	unsupported	dividends_paid 는 현금 지급액이며 주당배당과 다르다
+quick_ratio	당좌비율	BLOCK	-	-	-	unsupported	quick assets 정본 개념이 없다
+deferred_tax_asset_ctx	자산	CONTEXT	deferred_tax_assets	세법차이|일시적차이|미래세금	-	balance	세법 차이로 미래 세금이 줄어드는 효과 → 이연법인세자산
+tax_asset_clarify	자산	CLARIFY	current_tax_assets|deferred_tax_assets	세금|세무	-	balance	세금 관련 자산 — 당기분인지 이연분인지 시점이 안 정해진다
+deferred_tax_liab_ctx	부채	CONTEXT	deferred_tax_liabilities	세법차이|일시적차이|더낼	-	balance	세법 차이로 미래 세금이 늘어나는 효과 → 이연법인세부채
+tax_liab_clarify	부채	CLARIFY	current_tax_liabilities|deferred_tax_liabilities	세금|세무	-	balance	세금 관련 부채 — 당기분인지 이연분인지 시점이 안 정해진다
+cash_financing_ctx	현금	CONTEXT	cf_financing	차입|상환|자본조달|재무활동	이자|배당|세금	flow	현금 + 조달·상환 → 재무활동 순현금흐름
+cash_flow_clarify	현금	CLARIFY	cf_operating|cf_investing|cf_financing|net_change_in_cash	오간|오고간|드나든|흘러	-	flow	현금이 **오갔다**는 것은 잔액이 아니라 흐름이다 — 어느 활동인지가 남는다
+cash_equiv_change_ctx	현금성자산	CONTEXT	net_change_in_cash	순변동|증감|변동|순증감	-	flow	현금성자산 + 변동 → 순증감
+interest_borne_ctx	이자	CLARIFY	interest_expense|interest_paid	부담	받|수취|수익	flow	「부담한 이자」는 발생분인지 지급분인지가 안 정해진다
+finance_income_activity	금융활동	CONTEXT	finance_income	수익|이익	비용|손실	profit-stage	금융활동에서 생긴 수익 **전체** — 이자수익 하나가 아니다
+finance_costs_activity	금융활동	CONTEXT	finance_costs	비용|손실	수익|이익	profit-stage	금융활동 때문에 인식한 비용 **전체** — 이자비용 하나가 아니다
+diluted_eps_ctx	주당이익	CONTEXT	diluted_eps	희석|잠재적	-	profit-stage	잠재적 보통주 반영 → 희석주당이익
+share_premium_ctx	자본	CONTEXT	share_premium	액면|초과납입|초과	-	balance	액면 초과 납입액 → 자본잉여금
+retained_in_equity_ctx	자본	CONTEXT	retained_earnings	남은|유보|쌓	액면|초과|납입	balance	자본에 **남은** 누적 손익 → 이익잉여금. 액면 초과 납입은 자본잉여금이다
+dividend_cash_ctx	배당	CONTEXT	dividends_paid	송금|실제|현금|나간|지급된	-	flow	배당 + 실제 현금 지급 → 배당금지급액. route 를 물을 필요가 없다
+invest_net_ctx	투자	CONTEXT	cf_investing	순액|순현금|사고팔	-	flow	투자 + 순액 → 투자활동 순현금흐름
+depreciation_block	감가상각	BLOCK	-	-	-	unsupported	감가상각비·상각비가 56종에 없다. EBITDA 구어(「이자·세금·감가상각 차감 전」)도 여기서 막힌다
+units_sold_count	몇건팔았어	BLOCK	-	-	-	unsupported	판매 건수는 금액 계정이 아니다 — 몇개팔았어 와 같다
+revenue_sales_amount	판매금액	AUTO	revenue	-	-	revenue	「판매액」의 실측 변형
+tci_beyond_pl	순손익	CONTEXT	total_comprehensive_income	밖에서|포괄|더한|합한	-	profit-stage	순손익에 **손익 밖에서** 인식한 변동분까지 더하면 총포괄손익이다
+net_income_bare	순손익	AUTO	net_income	-	-	profit-stage	단서가 없으면 당기순손익
+deposit_interest	예금	CLARIFY	interest_income|interest_received	수입|이자|생긴	-	flow	예금에서 생긴 수입 — 발생분인지 수취분인지가 남는다
+receivable_bare	채권	CLARIFY	trade_receivables|trade_and_other_receivables	-	발행|투자|사채|채권자	balance	매출채권인지 기타채권까지인지가 남는다. **채권자**는 빚 갚을 상대이지 채권이 아니다
+gross_profit_ctx	손익	CONTEXT	gross_profit	직접대응|대응하는비용|대응하는원가	-	profit-stage	판매대금에서 **직접 대응하는** 원가를 뺀 단계 → 매출총손익
+eps_per_share_ctx	한주	CONTEXT	eps	귀속|이익|몫	희석|잠재적	profit-stage	보통주 한 주에 귀속된 이익 → 기본주당순이익
+other_income_ctx	수익	CONTEXT	other_income	나머지|그밖|분류되지않은	-	profit-stage	영업·금융으로 분류되지 않은 나머지 수익 → 기타수익
+other_expenses_ctx	비용	CONTEXT	other_expenses	나머지|그밖|분류되지않은	-	profit-stage	영업·금융으로 분류되지 않은 나머지 비용 → 기타비용
+provisions_ctx	부채	CONTEXT	provisions	확실하지않|불확실|미리	-	balance	금액·시기가 불확실한 현재의무 → 충당부채
+noncurrent_liab_ctx	부채	CONTEXT	non_current_liabilities	1년보다뒤|1년이후|1년넘|장기	-	balance	상환 기한이 1년을 넘는 부채 → 비유동부채
+rou_lease_ctx	리스	CONTEXT	right_of_use_assets	자산|장부|빌려|사용권	-	balance	리스로 빌려 쓰는 자산 → 사용권자산
+machine_capex	기계	CONTEXT	capex_ppe	들이|취득|사|도입|새로	팔|처분|매각|넘기	acquisition	생산기계를 들이며 지급한 현금 → 유형자산 취득
+intangible_capex_ctx	특허	CONTEXT	capex_intangible	취득|사들|도입|새로	넘기|처분|팔|매각	acquisition	특허·소프트웨어를 새로 취득하며 지급한 현금 → 무형자산 취득
+intangible_disposal_cash	특허	CONTEXT	disposal_intangible	현금	취득|사들|새로	disposal	특허를 넘기고 받은 **현금** → 무형자산 처분. 현금 단서가 없으면 공시 사건일 수 있다
+intangible_route	특허	ROUTE_CLARIFY	disposal_intangible|capex_intangible	-	-	disposal	특허 거래는 재무 숫자일 수도 공시 사건일 수도 있다
+contract_route	계약	ROUTE_CLARIFY	-	-	-	disclosure	계약 금액·해지 금액은 재무 계정이 아니라 공시 사건 필드다
+derived_ratio_word	비율	BLOCK	-	-	고정이하여신비율|부실여신비율|NPL비율|자본적정성|BIS|총자본비율|기본자본비율|보통주자본비율|지급여력비율|K-ICS|RBC|유동성커버리지비율|LCR|순안정자금조달비율|NSFR|보유비율|지분율	derived_metric	부채비율·유동비율 등 두 계정의 나눗셈. 공시에 값이 그대로 실리는 건전성·자본·보유 비율은 금지 단서로 제외한다(p9 금융 지표)
+derived_of_percent	의몇퍼센트	BLOCK	-	-	-	derived_metric	「A가 B의 몇 퍼센트」는 나눗셈 (ROE·ROA)
+derived_multiple	배수	BLOCK	-	-	-	derived_metric	「자본 대비 부채 배수」 등 나눗셈
+derived_turnover	회전	BLOCK	-	-	-	derived_metric	재고·자산 회전율은 나눗셈
+derived_cycle_count	순환횟수	BLOCK	-	-	-	derived_metric	회전율의 구어 — 「연간 재고 순환 횟수」
+derived_divided_by	나눈	BLOCK	-	-	-	derived_metric	「A를 B로 나눈」은 명시적 나눗셈
+derived_divide_if	나누면	BLOCK	-	-	-	derived_metric	나눈 과 같다
+derived_profit_rate	이익률	BLOCK	-	-	-	derived_metric	영업이익률 등 나눗셈
+derived_return_rate	수익률	BLOCK	-	-	-	derived_metric	수익률은 나눗셈
+derived_cost_rate	원가율	BLOCK	-	-	-	derived_metric	매출원가율은 나눗셈
+derived_margin	마진	BLOCK	-	-	순이자마진|보험계약마진|계약서비스마진	derived_metric	마진율은 나눗셈. 공시에 값이 실리는 순이자마진(NIM)·보험계약마진(CSM)은 제외한다(p9 금융 지표)

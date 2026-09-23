@@ -1,0 +1,111 @@
+# 계약상대 라틴 표기 ↔ 한글 음차
+#
+# 라틴 표기는 **정본 코퍼스에서 뽑았다**(한글이 없는 계약상대 133종).
+# 한글 음차는 원음과 외래어표기법을 반영해 사용자가 채웠다.
+# 동결 Gold의 question ID나 답을 참조하지 않는다. 원음 표준형과 함께 실제
+# 음차에서 널리 쓰이는 표기 변형도 넣을 수 있다(예: Freudenberg의
+# 「프로이덴베르크」/「프루덴베르크」).
+#
+# 형식: 라틴표기<TAB>한글음차(쉼표 구분)
+
+SATORP	사토프
+Troika Drive Investment, L.P.	트로이카 드라이브 인베스트먼트,트로이카
+LS ELECTRIC AMERICA Inc.	엘에스일렉트릭 아메리카,엘에스일렉트릭 미국법인
+General Electricity Company of Libya	리비아전력청,리비아 국영전력청
+MPA (Maritime and Port Authority of Singapore)	싱가포르 해사항만청,싱가포르 해양항만청,싱가포르 해운항만청,엠피에이
+SAUDI ARAMCO	사우디 아람코,아람코
+Crucible Metals Holdings, LLC	크루서블 메탈스 홀딩스,크루시블 메탈스 홀딩스
+Sarawak Shell Berhad	사라왁 쉘,사라왁 셸
+Advanced Global Investment Company	어드밴스트 글로벌 인베스트먼트 컴퍼니,어드밴스트 글로벌 인베스트먼트,에이지아이시,에이지아이씨
+GlaxoSmithKline Trading Services Limited	글락소스미스클라인,글랙소스미스클라인,지에스케이
+Shell Petroleum Development Company Nigeria Limited	쉘 나이지리아,셸 나이지리아,에스피디시,에스피디씨
+AIRBUS	에어버스
+CITI, Goldman Sachs, HSBC	씨티·골드만삭스·에이치에스비씨,시티·골드먼 색스·에이치에스비시
+Ford Motor Company	포드,포드자동차,포드 모터
+HD Hyundai Electric America Corporation	에이치디현대일렉트릭 아메리카,에이치디현대일렉트릭 미국법인
+HDB (Housing & Development Board)	싱가포르 주택개발청,에이치디비
+PT PLN(Persero)	인도네시아 국영전력공사,인도네시아 전력공사,피엘엔,페엘엔
+ARAMCO	아람코,사우디 아람코
+Abu Dhabi Oil Refining Company	아부다비 정유회사,아부다비정유회사,타크리어
+Airbus Atlantic	에어버스 애틀랜틱
+F.Hoffmann-La Roche Ltd	로슈,호프만라로슈,에프호프만라로슈
+Freudenberg Battery Power Systems, LLC	프로이덴베르크 배터리 파워 시스템즈,프로이덴베르크 배터리 파워 시스템스,프로이덴베르크,프루덴베르크
+HMM	에이치엠엠,현대상선
+Pfizer Ireland Pharmaceuticals	화이자,화이자 아일랜드,파이저,파이저 아일랜드
+The Bahrain Petroleum Company B.S.C	밥코,바레인석유회사,바레인 국영석유회사
+Aramco Asia Japan	아람코 아시아 재팬,아람코 아시아 일본법인
+Boeing	보잉
+Boeing Defence, Space & Security	보잉 디펜스 스페이스 앤드 시큐리티,보잉 디펜스·스페이스·시큐리티
+Bombardier Transportation (BT)	봄바디어 트랜스포테이션,봉바르디에 트랜스포테이션,봄바르디에 트랜스포테이션
+Collins Aerospace	콜린스 에어로스페이스,콜린스
+DRPIC	디알피아이씨,디아르피아이시,두쿰 정유회사,두쿰 정유합작회사
+Daher Aerospace INC	다에르 에어로스페이스,다헤르 에어로스페이스,다에르,다헤르
+EcoCAM Canada Inc.	에코캠 캐나다
+Eli Lilly Kinsale Limited	일라이 릴리 킨세일,일라이 릴리,릴리
+HSBC, Bank of America, Morgan Stanley	에이치에스비씨·뱅크오브아메리카·모건스탠리,에이치에스비시·뱅크 오브 아메리카·모건 스탠리
+Hanwha Philly Shipyard, Inc.	한화필리조선소,한화 필리조선소,필리조선소
+Hanwha Q CELLSAmerica Inc.	한화큐셀 아메리카,한화큐셀 미국법인
+Lusail Real Estate Development Company W.L.L.(LREDC)	루사일 부동산개발회사,루사일 부동산 개발회사
+Mercedes-Benz AG	메르세데스-벤츠,메르세데스 벤츠,벤츠
+Merck Sharp & Dohme (Switzerland) GmbH	엠에스디,머크 샤프 앤드 돔
+PT.PLN(Persero)	인도네시아 국영전력공사,인도네시아 전력공사,피엘엔,페엘엔
+Ras Laffan Petrochemicals	라스라판 석유화학,라스라판 페트로케미컬,라스라판 페트로케미컬스
+S-OIL	에쓰오일,에쓰-오일,에스오일
+SARAWAK PETCHEM SDN BHD	사라왁 펫켐,사라왁 페트켐
+SERVICIOS INDUSTRIALES DE LA MARINA S.A.	시마,시마 페루,페루 국영 해군조선소
+SWORDS LABORATORIES UNLIMITED COMPANY, DUBLIN, BOUDRY BRANCH	스워즈 래버러토리스,스워즈래버러토리스,소드스 래버러토리스,소드스래버러토리스,브리스톨마이어스스큅
+Samsung Engineering (Thailand) Co., Ltd.	삼성엔지니어링 태국법인,삼성이앤에이 태국법인
+UCB	유씨비,유씨비파마,유씨비제약,유시비,유시비 파마
+Vale International SA	발레 인터내셔널,발레,발리 인터내셔널,발리
+- Shenzhen Tencent Computer Systems Company Limited - Hainan Tencent Network Information Technology Company Limited	선전 텐센트·하이난 텐센트,텐센트,선전 텅쉰·하이난 텅쉰,텅쉰
+ABU DHABI NATIONAL OIL COMPANY (ADNOC)	애드녹,에드녹,아드녹,아부다비 국영석유공사,아부다비 국영석유회사
+ALGIHAZ	알지하즈,알기하즈
+ASE [Advanced Semiconductor Engineering,Inc.]	에이에스이,어드밴스트 세미컨덕터 엔지니어링
+Al Fanar	알파나르,알 파나르
+Algihaz Contracting Company	알지하즈 컨트랙팅,알기하즈 컨트랙팅,알지하즈 건설,알기하즈 건설
+Amazon Games	아마존 게임즈,아마존게임즈,아마존 게임스,아마존게임스
+Aramco Asia Japan K.K.	아람코 아시아 재팬,아람코 아시아 일본법인
+Ashghal Public Water Works	아쉬갈,카타르 공공사업청
+BAE Systems	비에이이 시스템스,비에이이시스템스
+BMC OTOMOTIV SANAYI VE TICARET A.S.	비엠씨 오토모티브,비엠씨,비엠시 오토모티브,비엠시
+Baxter Healthcare Corporation	박스터 헬스케어,박스터,백스터 헬스케어,백스터
+Cilag GmbH International	실락,실락 인터내셔널,실라그,실라그 인터내셔널,실래그,실래그 인터내셔널
+Cytodyn Inc.	사이토다인
+EVE UAM, LLC社, EMBRAER S.A.社	이브 유에이엠·엠브라에르,이브 에어 모빌리티·엠브라에르
+Embraer	엠브라에르
+GS CALTEX	지에스칼텍스,지에스 칼텍스
+General Electric(GE)	제너럴 일렉트릭,제너럴일렉트릭,지이
+HICO America Sales & Tech,Inc.	하이코 아메리카,하이코 아메리카 세일즈앤테크
+HICO America Sales & Tech.	하이코 아메리카,하이코 아메리카 세일즈앤테크
+Hanwha Q CELLS USA Corp.,	한화큐셀 유에스에이,한화큐셀 미국법인
+Hanwha Shipping LLC	한화쉬핑,한화시핑,한화 해운
+Huta Stalowa Wola S.A.	후타 스탈로바 볼라,에이치에스더블유
+Hyundai Electric America Corporation	현대일렉트릭 아메리카,현대일렉트릭 미국법인,에이치디현대일렉트릭 아메리카
+ISUZU MOTORS LIMITED	이스즈자동차,이스즈
+Ichnos Sciences	아이크노즈 사이언스,아이크노스 사이언스,아이크노즈,아이크노스
+Infineon Technologies Asia Pacific Pte Ltd	인피니언,인피니언 테크놀로지스,인피니온,인피니온 테크놀로지스
+Kawasaki Heavy Industries, Ltd. (KHI)	가와사키중공업,가와사키 중공업,가와사키,카와사키중공업,카와사키 중공업,카와사키
+Kiniksa Pharmaceuticals (UK), Ltd	키닉사 파마슈티컬스,키닉사파마슈티컬스,키닉사
+Kuwait National Petroleum Company	쿠웨이트 국영석유회사,케이엔피씨,케이엔피시
+LS Energy Solution	엘에스에너지솔루션,엘에스 에너지솔루션
+Larsen & Toubro Limited (L&T)	라르센앤투브로,라르센 앤드 투브로,라센 앤 투브로,라슨 앤 투브로,라슨앤드투브로,엘앤티
+MICRON	마이크론,마이크론테크놀로지
+MOTIONAL AD INC.	모셔널,모셔널 에이디
+Mitsui & Co. Ltd	미쓰이물산,미쓰이,미츠이
+National Grid SA	사우디전력청,사우디 내셔널그리드,사우디 내셔널 그리드
+Neom Company	네옴,네옴컴퍼니,네옴 컴퍼니
+NextEra Energy	넥스트에라 에너지,넥스트에라
+Nigeria LNG Limited	나이지리아 엘엔지
+Novartis Pharma AG	노바티스,노바티스 파마
+Renault S.A.S	르노,르노그룹
+SEC(Saudi Electricity Company)	사우디전력공사,사우디전력회사,에스이씨,에스이시
+STATE CONCERN, TURKMENHIMIYA	투르크멘히미야,투르크메니스탄 국영화학공사
+Samsung E&A America Inc.	삼성이앤에이 아메리카,삼성이앤에이 미국법인,삼성엔지니어링 미국법인
+Sun Pharma Global FZE	선파마,선 파마,선파마 글로벌
+TEVA Pharmaceuticals International GmbH	테바,테바제약,테바 파마슈티컬스
+TOTALENERGIES EP RATAWI HUB SAS	토탈에너지스,토탈에너지스 이피 라타위 허브
+The Boeing Company	보잉
+Unimicron Technology Corp.	유니마이크론,유니마이크론 테크놀로지
+Vertical Aerospace Group Ltd.	버티컬 에어로스페이스
+Vietnam National Industry-Energy Group (PVN)	페트로베트남,베트남 국가산업에너지그룹,베트남 국영 산업에너지그룹,피브이엔
+YANG MING MARINE TRANSPORT CORP.	양밍해운,양밍

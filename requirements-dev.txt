@@ -1,0 +1,3 @@
+# 개발·검수 도구. 런타임 의존성은 requirements.txt (평가 서버는 이 파일이 필요 없다).
+#   .venv/bin/pip install -r requirements-dev.txt
+ruff==0.16.5
