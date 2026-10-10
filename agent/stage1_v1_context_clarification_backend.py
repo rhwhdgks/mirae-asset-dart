@@ -233,7 +233,7 @@ class MissingContextClarificationBackend:
             and any(token in normalized for token in ("변동", "차이", "증감"))
         )
         if is_contract_amount_change:
-            return _authority(item_id=item.item_id, slots=[
+            slots = [
                 {
                     "role_hint": "entity",
                     "prompt": "어느 회사인지 알려주세요.",
@@ -248,11 +248,13 @@ class MissingContextClarificationBackend:
                         "변동을 비교할 두 시점을 알려주세요. "
                         "(예: 2024-12-31, 2025-12-31)"),
                 },
-                {
+            ]
+            if "계약금액" not in normalized or "해지금액" in normalized:
+                slots.append({
                     "role_hint": "value_kind",
                     "prompt": "계약금액과 해지금액 중 무엇을 비교할까요?",
-                },
-            ])
+                })
+            return _authority(item_id=item.item_id, slots=slots)
         # 대상이 **개체 자체**이고 좌표가 하나도 없으면 무엇을 물었는지 정해지지
         # 않는다.  「회사 상태」는 재무일 수도, 공시일 수도, 계약일 수도 있다.
         #

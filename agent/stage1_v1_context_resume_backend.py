@@ -392,6 +392,16 @@ def _amount_slot(value: str) -> str:
         "value_kind 답변은 계약금액 또는 해지금액이어야 합니다")
 
 
+def _explicit_contract_amount_change(item: Any) -> bool:
+    """Recognize only the amount kind and change axis stated in the intent."""
+
+    if item.target.kind != "metric":
+        return False
+    normalized = "".join(item.target.surface.split()).casefold()
+    return ("계약금액" in normalized and "해지금액" not in normalized
+            and any(word in normalized for word in ("변동", "차이", "증감")))
+
+
 def _two_timepoints(value: str, *, corpus_cutoff: str) -> list[str]:
     parsed = question_date_surfaces(value)
     if len(parsed) != 2 or any(
@@ -572,7 +582,9 @@ class CanonicalContractAmountChangeResumeBackend:
         entity_answer = answers.get("entity")
         time_answer = answers.get("timepoint")
         value_answer = answers.get("value_kind")
-        if entity_answer is None or time_answer is None or value_answer is None:
+        if (entity_answer is None or time_answer is None
+                or (value_answer is None
+                    and not _explicit_contract_amount_change(item))):
             raise ContextClarificationResolutionError(
                 "contract amount change 필수 clarification 답변이 없습니다")
         companies = self.canonical.resolve_company(entity_answer.value)
@@ -593,7 +605,8 @@ class CanonicalContractAmountChangeResumeBackend:
                     item_id=item.item_id, role="timepoint"),
             )
         try:
-            amount_slot = _amount_slot(value_answer.value)
+            amount_slot = (_amount_slot(value_answer.value)
+                           if value_answer is not None else "계약금액")
         except ContextClarificationResolutionError:
             return ClarificationResumeResult(
                 derived_source_intent=derived,
@@ -947,9 +960,14 @@ class CompositeClarificationResumeBackend:
         # four-slot contract amount-change flow.  Route only when the latter's
         # full semantic context is present; otherwise a financial answer such
         # as ``revenue`` is incorrectly parsed as a contract amount kind.
-        if {"entity", "timepoint", "value_kind"} <= all_roles:
-            return self.contract_change_backend.resume(**kwargs)
         intent: SemanticIntent = kwargs["current_source_intent"]
+        explicit_contract_change = (
+            len(intent.answer_items) == 1
+            and _explicit_contract_amount_change(intent.answer_items[0]))
+        if ({"entity", "timepoint", "value_kind"} <= all_roles
+                or (explicit_contract_change
+                    and {"entity", "timepoint"} <= all_roles)):
+            return self.contract_change_backend.resume(**kwargs)
         if (len(intent.answer_items) == 1
                 and intent.answer_items[0].target.kind == "event"
                 and not intent.entities
