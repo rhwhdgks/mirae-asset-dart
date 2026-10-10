@@ -713,6 +713,7 @@ class NarrativeTool:
                 as_of=task.as_of,
                 retrieval_query=cell.topic,
                 operation=task.operation,
+                matrix_cell=matrix,
                 # In matrix mode slots must be checked across all cells, not
                 # repeated as a false per-cell omission.
                 requested_slots=[] if matrix else task.requested_slots,
@@ -923,6 +924,13 @@ class NarrativeTool:
                         hits = structural_hits
             if ds and ds.form:
                 hits = tuple(h for h in hits if _form_of(self.rm, h.doc_id, ds.form))
+            if pr is not None and getattr(task, "matrix_cell", False):
+                # A year-labelled matrix cell must not borrow a filing from
+                # the following year's discovery window.  In particular, a
+                # half-year filing cannot stand in for the prior annual
+                # endpoint and then be subtracted from the next annual one.
+                hits = tuple(h for h in hits if _matches_matrix_period(
+                    self.rm, h.doc_id, pr))
             if pr is not None and ds and ds.form and "사업보고서" in ds.form:
                 # A fiscal-period comparison must bind to that fiscal year's
                 # annual report, not merely any annual report filed within the
@@ -1118,6 +1126,10 @@ class NarrativeTool:
                         text=public_block,
                         citations=[ClaimCitation(doc_id=sec.doc_id, rcept_no=rc,
                                                  section_id=sec.section_id,
+                                                 report_name=(
+                                                     self.rm.document_label(sec.doc_id)
+                                                     if callable(getattr(self.rm, "document_label", None))
+                                                     else None),
                                                  locator=h.locator or sec.locator,
                                                  excerpt_prompt_safe=public_block if described_subject else _safe_excerpt(
                                                      public_block,
@@ -3005,6 +3017,43 @@ def _form_of(rm, doc_id: str, form: str) -> bool:
     if meta is None:
         return True
     return form in ((getattr(meta, "report_nm", "") or "") + (getattr(meta, "form", "") or ""))
+
+
+def _matches_matrix_period(rm, doc_id: str, period) -> bool:
+    """Require a matrix filing to cover its typed, standard fiscal period.
+
+    Search's 15-month filing window is a discovery bound, not proof that a
+    hit reports the requested fiscal year.  For non-standard date ranges we
+    leave the existing selector behavior unchanged; standard annual, half-
+    year and cumulative quarter endpoints must match document metadata.
+    """
+
+    start, end = getattr(period, "start", None), getattr(period, "end", None)
+    if start is None or end is None or start.year != end.year:
+        return True
+    expected = {
+        ((1, 1), (3, 31)): (3, "quarter"),
+        ((1, 1), (6, 30)): (6, "half"),
+        ((1, 1), (9, 30)): (9, "quarter"),
+        ((1, 1), (12, 31)): (12, "annual"),
+    }.get(((start.month, start.day), (end.month, end.day)))
+    if expected is None:
+        return True
+    rm._load_docs()
+    meta = rm._documents.get(doc_id)
+    if meta is None or getattr(meta, "doc_group", None) != "periodic":
+        return False
+    month, form = expected
+    if (getattr(meta, "base_year", None) != end.year
+            or getattr(meta, "base_month", None) != month):
+        return False
+    actual_form = str(getattr(meta, "form", "") or "")
+    names = {
+        "annual": ("annual", "사업보고서"),
+        "half": ("half", "반기보고서"),
+        "quarter": ("quarter", "분기보고서"),
+    }
+    return any(name in actual_form for name in names[form])
 
 
 def _plus_months(yyyymmdd: str, months: int) -> str:

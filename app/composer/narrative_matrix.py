@@ -3593,7 +3593,8 @@ def _propagate_cross_topic_restatement_basis(
 def _metric_deltas(
         cells: tuple["MatrixCellEvidence", ...],
         ) -> tuple[tuple[_ComparableMetric, _ComparableMetric, Decimal], ...]:
-    if len(cells) < 2 or _has_reclassified_comparatives(cells):
+    if (len(cells) < 2 or _has_reclassified_comparatives(cells)
+            or not _aligned_period_reports(cells)):
         return ()
     rows = [_direct_metrics(cell.excerpt) for cell in cells]
     maps = [{metric.key: metric for metric in row} for row in rows]
@@ -3834,6 +3835,42 @@ def _cell_report_year(cell: "MatrixCellEvidence") -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _aligned_period_reports(cells: tuple["MatrixCellEvidence", ...]) -> bool:
+    """Check the cited filing form and target period before endpoint deltas.
+
+    Older synthetic/legacy cells have no report metadata, so their existing
+    exact-table rules remain in force.  Once any cell has an actual report
+    name, however, every endpoint needs one unambiguous filing identity.
+    """
+
+    if not any(cell.report_names for cell in cells):
+        return True
+    bases: set[tuple[str, int]] = set()
+    for cell in cells:
+        if len(cell.report_names) != 1:
+            return False
+        name = cell.report_names[0]
+        form = ("half" if "반기보고서" in name else
+                "quarter" if "분기보고서" in name else
+                "annual" if "사업보고서" in name else "")
+        reported = re.search(r"\(\s*(20\d{2})[.\-/](\d{1,2})\s*\)", name)
+        if not form or reported is None:
+            return False
+        year, month = int(reported.group(1)), int(reported.group(2))
+        label = cell.label.partition(" · ")[2]
+        range_end = re.search(r"~(20\d{2})-(\d{2})-(\d{2})$", label)
+        if range_end:
+            if (year, month) != (int(range_end.group(1)), int(range_end.group(2))):
+                return False
+        elif re.fullmatch(r"20\d{2}년", label):
+            if year != _cell_report_year(cell) or (form, month) != ("annual", 12):
+                return False
+        else:
+            return False
+        bases.add((form, month))
+    return len(bases) == 1
+
+
 def _structured_row_key(label: str) -> str:
     """Normalize only structural aggregate aliases inside a composite row."""
 
@@ -3954,7 +3991,7 @@ def _structured_cross_cell_deltas(
         ) -> tuple[_StructuredPeriodDelta, ...]:
     """Match identical composite row coordinates across requested reports."""
 
-    if len(cells) < 2:
+    if len(cells) < 2 or not _aligned_period_reports(cells):
         return ()
     if _has_reclassified_comparatives(cells):
         # A latest report can reclassify historical segment values even when
@@ -4056,7 +4093,7 @@ def _structured_explicit_year_fallback(
     inventing a cross-document join.
     """
 
-    if len(cells) < 2:
+    if len(cells) < 2 or not _aligned_period_reports(cells):
         return ()
     before_year = _cell_report_year(cells[0])
     after_year = _cell_report_year(cells[-1])
@@ -4500,6 +4537,7 @@ class MatrixCellEvidence:
     excerpt: str
     receipts: tuple[str, ...]
     restated_comparatives: bool = False
+    report_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4578,6 +4616,10 @@ class NarrativeMatrix:
                 linked = [claims_by_id[output_id] for output_id in output_ids
                           if output_id in claims_by_id]
                 receipts = _receipt_numbers(linked)
+                report_names = tuple(dict.fromkeys(
+                    citation.report_name for claim in linked
+                    for citation in claim.citations
+                    if citation.report_name and citation.rcept_no in receipts))
                 # A per-cell sentence without its own receipt is not allowed.
                 if len(linked) != len(output_ids) or not receipts:
                     return None
@@ -4607,7 +4649,8 @@ class NarrativeMatrix:
                 label = f"{coordinate.corp_name} · {public_period}"
                 cells.append(MatrixCellEvidence(
                     cell_id=coordinate_id, label=label, topic=coordinate.topic,
-                    excerpt=excerpt, receipts=receipts))
+                    excerpt=excerpt, receipts=receipts,
+                    report_names=report_names))
                 bindings_by_coordinate[signature] = output_ids
                 corp_names.add(coordinate.corp_name)
                 periods.add(public_period)
@@ -4625,7 +4668,8 @@ class NarrativeMatrix:
             if previous is None:
                 deduped[key] = MatrixCellEvidence(
                     cell.cell_id, cell.label, _topic_display(cell.topic),
-                    cell.excerpt, cell.receipts)
+                    cell.excerpt, cell.receipts,
+                    report_names=cell.report_names)
                 continue
             old = re.sub(r"\s+", " ", previous.excerpt).strip()
             new = re.sub(r"\s+", " ", cell.excerpt).strip()
@@ -4633,7 +4677,9 @@ class NarrativeMatrix:
                        if old in new else f"{previous.excerpt} / {cell.excerpt}")
             deduped[key] = MatrixCellEvidence(
                 previous.cell_id, previous.label, previous.topic, excerpt,
-                tuple(dict.fromkeys((*previous.receipts, *cell.receipts))))
+                tuple(dict.fromkeys((*previous.receipts, *cell.receipts))),
+                report_names=tuple(dict.fromkeys(
+                    (*previous.report_names, *cell.report_names))))
         cells = list(deduped.values())
         if len(corp_names) > 1:
             kind = "회사별 비교"
@@ -5383,6 +5429,13 @@ class NarrativeMatrix:
                 typed_cells = tuple(sorted(
                     cells, key=lambda cell: cell.label.partition(" · ")[2]))
                 display_topic = _topic_display(typed_cells[0].topic)
+                if not _aligned_period_reports(typed_cells):
+                    period_statements.append((
+                        company, display_topic,
+                        "인용된 보고서의 종류나 대상 기간이 요청한 기간과 달라 "
+                        "서로 다른 기간의 수치를 빼지 않았습니다. "
+                        "각 값과 접수번호는 아래 기간별 근거에서 확인할 수 있습니다"))
+                    continue
                 main_business_change = _is_main_business_topic(display_topic)
                 # An identical finding is stronger than a display-level
                 # similarity.  Require the complete retained source excerpts
