@@ -4114,11 +4114,54 @@ class DocumentTool(BaseTool):
                         limitations=lims, used=used))
                 used.extend(chain)
         else:  # find
+            # The title/date collection is sourced from document metadata,
+            # not from a representative Field cell.  Keep this path limited
+            # to the one form whose public list renders those two attributes.
+            title_date_form = (
+                task.selector is not None
+                and task.selector.form == "투자판단관련주요경영사항")
+            metadata_by_receipt = {}
+            if title_date_form:
+                seed_set = set(seeds)
+                metadata_by_receipt = {
+                    meta.rcept_no: meta
+                    for meta in self.rm.documents(
+                        as_of=task.as_of, corp_code=task.corp_code,
+                        form=task.selector.form)
+                    if meta.rcept_no in seed_set
+                }
             for s in seeds:
                 rows = list(self.fidx.rows(
                     task.corp_code, as_of=task.as_of, rcept_no=s))
-                if rows:
-                    row = rows[0]
+                row = rows[0] if rows else None
+                if title_date_form:
+                    meta = metadata_by_receipt.get(s)
+                    if (meta is None or not meta.report_nm or not meta.rcept_dt
+                            or (row is not None and (
+                                row.doc_id != meta.doc_id
+                                or row.report_nm != meta.report_nm
+                                or row.rcept_dt != meta.rcept_dt
+                                or row.is_correction != meta.is_correction))):
+                        lims.append(Limitation(
+                            code="evidence_unavailable",
+                            detail=f"{s}: 공시 제목·접수일 메타데이터를 확인할 수 없음",
+                            affected_doc_ids=[s]))
+                        continue
+                    document_kind = (
+                        "정정공시" if meta.is_correction
+                        else meta.form or "공시")
+                    title = " ".join(meta.report_nm.split())
+                    date = meta.rcept_dt
+                    citations = [ClaimCitation(
+                        doc_id=meta.doc_id, rcept_no=meta.rcept_no,
+                        locator="document",
+                        excerpt_prompt_safe=(
+                            f"공시명: {meta.report_nm}\n"
+                            f"접수일: {meta.rcept_dt}\n"
+                            f"접수번호: {meta.rcept_no}"),
+                        verification="source_roundtrip",
+                        report_name=meta.report_nm)]
+                elif row is not None:
                     if "해지" in (row.form or ""):
                         document_kind = "해지공시"
                     elif row.is_correction:
@@ -4131,23 +4174,28 @@ class DocumentTool(BaseTool):
                     # form documents apart — append it when it adds
                     # information the category alone does not already carry.
                     title = " ".join((row.report_nm or "").split())
-                    if title and title != document_kind:
-                        detail = (title if document_kind in title
-                                  else f"{document_kind} {title}")
-                    else:
-                        detail = document_kind
-                    text = (f"{detail} (접수번호 {s}, "
-                            f"접수일 {row.rcept_dt})")
+                    date = row.rcept_dt
+                    citations = self._doc_cites(
+                        task.corp_code, s, task.as_of)
                 else:
                     document_kind = "공시"
-                    text = f"공시 (접수번호 {s})"
+                    title = ""
+                    date = ""
+                    citations = self._doc_cites(
+                        task.corp_code, s, task.as_of)
+                if title and title != document_kind:
+                    detail = (title if document_kind in title
+                              else f"{document_kind} {title}")
+                else:
+                    detail = document_kind
+                text = (f"{detail} (접수번호 {s}, 접수일 {date})"
+                        if date else f"{detail} (접수번호 {s})")
                 claims.append(AnswerClaim(
                     output_id=f"{task.task_id}.{s}", label=f"문서 {s}",
                     state=document_kind, text=text,
-                    citations=self._doc_cites(
-                        task.corp_code, s, task.as_of)))
+                    citations=citations))
                 used.append(s)
-                if rows and row.is_correction:
+                if row is not None and row.is_correction:
                     self._append_provisional_correction_lineage(
                         corp_code=task.corp_code, rcept_no=s,
                         as_of=task.as_of, limitations=lims)
