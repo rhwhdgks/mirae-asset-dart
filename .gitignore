@@ -13,6 +13,11 @@ venv/
 raw/
 data/corpus/
 out/
+src/ingest/account_map.tsv
+src/ingest/acode_map.tsv
+src/ingest/financial_period_overrides.tsv
+src/canonical/quality_decisions.tsv
+src/canonical/company_aliases_approved.json
 fixtures/
 eval/dataset/
 tests/gold/
