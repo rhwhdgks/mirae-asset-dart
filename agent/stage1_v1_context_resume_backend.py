@@ -31,6 +31,9 @@ from .stage1_v1_clarification_session import (
     ClarificationResolutionContext,
     ClarificationResumeResult,
 )
+from .stage1_v1_context_clarification_backend import (
+    _explicit_current_contract_amount,
+)
 from .stage1_v1_event_clarification_backend import (
     CanonicalSelectedEventResumeBackend,
 )
@@ -736,24 +739,58 @@ class CanonicalGenericEventContextResumeBackend:
             "item_ids": [item_id],
         }])
 
+    def _retry_cutoff(self, item_id: str) -> ClarificationAuthority:
+        cutoff = self.corpus_cutoff
+        shown_date = f"{cutoff[:4]}-{cutoff[4:6]}-{cutoff[6:]}"
+        return ClarificationAuthority.model_validate({
+            "kind": "clarification", "slots": [{
+                "slot_id": "slot-1", "role_hint": "timepoint",
+                "reason_code": "missing_context",
+                "response_kind": "provide_value",
+                "prompt": (
+                    f"보유 자료는 {shown_date}까지입니다. "
+                    f"이 날짜 기준으로 확인하려면 {shown_date}를 입력해주세요."),
+                "applies_to_item_ids": [item_id], "mention_ids": [],
+                "options": [],
+            }],
+        }, strict=True)
+
     def resume(
             self, *, question_id: str, question: str,
             original_source_intent: SemanticIntent,
             current_source_intent: SemanticIntent,
             context: ClarificationResolutionContext,
             ) -> ClarificationResumeResult:
-        del question, original_source_intent
+        del original_source_intent
         if (len(current_source_intent.answer_items) != 1
                 or current_source_intent.entities):
             raise ContextClarificationResolutionError(
                 "generic event context는 issuer 없는 event item 하나만 지원합니다")
         item = current_source_intent.answer_items[0]
-        if (item.target.kind != "event" or item.target.entity_refs
-                or item.operation != "retrieve"):
+        current_amount = _explicit_current_contract_amount(item, question)
+        if ((item.target.kind != "event" and not current_amount)
+                or item.target.entity_refs or item.operation != "retrieve"):
             raise ContextClarificationResolutionError(
                 "generic event context topology가 지원 범위를 벗어납니다")
         derived = _remove_answered_mentions(current_source_intent, context)
         answers = _all_context_answers(context)
+        if current_amount:
+            timepoint = answers.get("timepoint")
+            cutoff_date = (
+                int(self.corpus_cutoff[:4]), int(self.corpus_cutoff[4:6]),
+                int(self.corpus_cutoff[6:]))
+            confirmed = (
+                timepoint is not None
+                and (timepoint.value == self.corpus_cutoff
+                     or question_date_surfaces(timepoint.value)
+                     == {cutoff_date}))
+            if "value_kind" in answers:
+                raise ContextClarificationResolutionError(
+                    "현재 계약금액에는 별도의 금액 종류 답변이 필요하지 않습니다")
+            if not confirmed:
+                return ClarificationResumeResult(
+                    derived_source_intent=derived,
+                    authority=self._retry_cutoff(item.item_id))
         entity_answer = answers.get("entity")
         if entity_answer is None:
             raise ContextClarificationResolutionError(
@@ -964,6 +1001,13 @@ class CompositeClarificationResumeBackend:
         explicit_contract_change = (
             len(intent.answer_items) == 1
             and _explicit_contract_amount_change(intent.answer_items[0]))
+        current_contract_amount = (
+            len(intent.answer_items) == 1
+            and _explicit_current_contract_amount(
+                intent.answer_items[0], kwargs.get("question", "")))
+        if current_contract_amount and {
+                "entity", "event", "timepoint"} <= all_roles:
+            return self.generic_event_backend.resume(**kwargs)
         if ({"entity", "timepoint", "value_kind"} <= all_roles
                 or (explicit_contract_change
                     and {"entity", "timepoint"} <= all_roles)):

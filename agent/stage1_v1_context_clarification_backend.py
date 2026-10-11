@@ -36,6 +36,31 @@ def _empty_scope(item: Any) -> bool:
     return _empty_coordinates(item) and not item.target.entity_refs
 
 
+def _explicit_current_contract_amount(item: Any, question: str) -> bool:
+    """A single stated contract amount at the available corpus cutoff.
+
+    The question's ``지금/현재`` supplies the time axis, but the user must
+    confirm the actual corpus date before the selected event is read.
+    """
+
+    target = "".join(item.target.surface.split()).casefold()
+    field = "".join(item.output.field_surfaces[0].split()).casefold() \
+        if len(item.output.field_surfaces) == 1 else ""
+    return (
+        item.target.kind == "metric"
+        and item.operation == "retrieve"
+        and item.output.shape == "scalar"
+        and item.output.projection_mode == "named_fields"
+        and _empty_scope(item)
+        and "계약금액" in target
+        and "해지금액" not in target
+        and not any(word in target for word in ("변동", "차이", "증감"))
+        and field in {"계약금액", "금액", "얼마"}
+        and any(word in question for word in ("지금", "현재"))
+        and not any(word in question for word in ("변동", "차이", "증감"))
+    )
+
+
 #: 개념 표시 표기는 ``agent.planning`` 이 정본 계정 사전으로 검증한 하나의 표를
 #: 쓴다. 여기 네 개만 두었을 때는 나머지 개념이 식별자로 노출됐다.
 def _metric_label(concept: str) -> str:
@@ -310,6 +335,27 @@ class MissingContextClarificationBackend:
             if is_contract_amount:
                 company_missing = not item.target.entity_refs
                 if company_missing:
+                    if (self.corpus_cutoff is not None
+                            and _explicit_current_contract_amount(item, question)):
+                        cutoff = self.corpus_cutoff
+                        shown_date = f"{cutoff[:4]}-{cutoff[4:6]}-{cutoff[6:]}"
+                        return _authority(item_id=item.item_id, slots=[
+                            {
+                                "role_hint": "entity",
+                                "prompt": "어느 회사인지 알려주세요.",
+                            },
+                            {
+                                "role_hint": "event",
+                                "prompt": "어느 계약인지 접수번호 또는 계약명을 알려주세요.",
+                            },
+                            {
+                                "role_hint": "timepoint",
+                                "prompt": (
+                                    f"보유 자료는 {shown_date}까지입니다. "
+                                    "이 날짜의 계약금액을 확인하려면 "
+                                    f"{shown_date}를 입력해주세요."),
+                            },
+                        ])
                     return _authority(item_id=item.item_id, slots=[
                         {
                             "role_hint": "entity",
