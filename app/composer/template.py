@@ -2214,6 +2214,101 @@ def _contract_completion_correction_conclusion(claims) -> str | None:
     return unique[0] if len(unique) == 1 else None
 
 
+def _withheld_contract_estimate_explanation(
+        claims, question: str | None) -> str | None:
+    """Explain a newly disclosed, explicitly estimated contract amount.
+
+    This applies only when a question challenges an apparent amount increase,
+    the typed correction says the amount was disclosed from a withheld value,
+    and one receipt-linked prose correction states the estimate basis and a
+    dated termination.  If any part is missing or conflicts, the ordinary
+    correction answer remains in control.
+    """
+
+    if (not question
+            or re.search(r"왜|이유|사유|원인", question) is None
+            or re.search(r"계약금액|금액|10\s*조", question) is None
+            or re.search(r"늘|증가|커진|10\s*조", question) is None
+            or re.search(r"10\s*조", question) is None
+            or re.search(r"비율|기간|정정\s*(?:이력|내역|내용)", question)):
+        return None
+
+    amounts = [
+        claim for claim in claims
+        if claim.operator == "correction_diff"
+        and claim.state == "disclosed_from_withheld"
+        and "계약금액" in (claim.label or "")
+        and claim.value_text
+        and claim.canonical_unit == "원"
+        and claim.canonical_value
+    ]
+    if len(amounts) != 1:
+        return None
+    amount = amounts[0]
+    receipts = {
+        citation.rcept_no for citation in (amount.citations or ())
+        if citation.rcept_no
+        and re.fullmatch(r"\d{14}", citation.rcept_no)
+    }
+    if len(receipts) != 1:
+        return None
+    receipt = next(iter(receipts))
+
+    narratives = [
+        claim for claim in claims
+        if claim.operator == "correction_diff"
+        and _is_narrative_correction(claim)
+        and receipt in {
+            citation.rcept_no for citation in (claim.citations or ())
+        }
+    ]
+    if len(narratives) != 1:
+        return None
+    narrative = narratives[0]
+    change = _display_text(narrative.text or "")
+    change = re.sub(r"^\[[^\]]+\]\s*", "", change)
+    change = re.sub(r"\s*\[사유:[^\]]+\]\s*$", "", change)
+    if change.count(" → ") != 1:
+        return None
+    before, after = (side.strip() for side in change.split(" → ", 1))
+
+    # Each detail is copied from the correction's explicit before/after text;
+    # do not infer an estimate method or current contract status from the
+    # amount row alone.
+    if ("예상 계약금액은 확정되지" not in before
+            or "유보기한 종료 후 공시 예정" not in before
+            or "예상 계약금액은 확정되지" not in after
+            or "계약 공급물량" not in after
+            or "배터리 판가 가격" not in after
+            or "추정금액" not in after):
+        return None
+    volume_before = re.search(
+        r"총\s*(?P<volume>[\d,]+(?:\.\d+)?)\s*GWh", before)
+    volume_after = re.search(
+        r"총\s*(?P<volume>[\d,]+(?:\.\d+)?)\s*GWh", after)
+    signing_date = re.search(
+        r"계약\s*체결일\s*\((?P<date>20\d{2}년\s*\d{1,2}월\s*\d{1,2}일)\)"
+        r"\s*기준\s*배터리\s*판가\s*가격", after)
+    termination_date = re.search(
+        r"(?P<date>20\d{2}년\s*\d{1,2}월\s*\d{1,2}일)자로\s*해지", after)
+    if (volume_before is None or volume_after is None
+            or volume_before.group("volume") != volume_after.group("volume")
+            or signing_date is None or termination_date is None):
+        return None
+
+    amount_text = _display_amount(amount)
+    volume = volume_after.group("volume")
+    signed = signing_date.group("date")
+    terminated = termination_date.group("date")
+    return (
+        f"10조 원으로 늘어난 것이 아니라, 공시유보 해제로 비공개였던 "
+        f"추정액 {amount_text}이 공개된 것입니다. 이 추정액은 계약금액이 "
+        f"확정되기 전에 총 {volume}GWh 공급물량에 계약 체결일({signed}) "
+        f"기준 배터리 판가를 적용해 산정됐습니다. 해당 계약은 "
+        f"{terminated} 해지됐습니다.{_cite(narrative)}"
+    )
+
+
 def _correction_conclusion(claims, *, reject_increase: bool = False) -> str | None:
     """Lead with the material typed correction instead of its row count."""
 
@@ -3491,6 +3586,14 @@ class TemplateComposer:
         requested_fields = _requested_correction_fields(question)
         asks_correction_reason = bool(question and re.search(
             r"왜|이유|사유|원인", question))
+        estimate_explanation = _withheld_contract_estimate_explanation(
+            p.claims, question)
+        if estimate_explanation and not asks_correction_inventory:
+            lines.append(estimate_explanation)
+            notes = self._public_notes(p, question=question)
+            if notes:
+                _extend_public_qualifications(lines, notes)
+            return "\n".join(line for line in lines if line)
         if (requested_fields and not asks_correction_inventory
                 and not asks_correction_reason):
             # 명시된 필드가 있으면 상태·정정사유·기타 투자판단 문안까지 모두
