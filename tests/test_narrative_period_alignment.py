@@ -10,6 +10,8 @@ from app.composer.narrative_matrix import (
     _metric_contrast,
     _structured_cross_cell_deltas,
 )
+from app.composer.template import _comprehensive_matrix_reduction_disclosure
+from agent.stage1_v1_narrative_matrix import literal_matrix_grammar
 from app.tools.narrative import _matches_matrix_period
 
 
@@ -66,3 +68,26 @@ def test_same_annual_report_basis_keeps_valid_delta():
     )
     assert _aligned_period_reports(cells)
     assert "30억원 증가" in _metric_contrast(cells, topic="매출구성")
+
+
+def test_matrix_reduction_disclosure_recognizes_years_joined_by_mit():
+    companies = ("가상전자", "가상반도체", "가상부품", "가상모듈", "가상장비")
+    question = (
+        "가상전자·가상반도체·가상부품·가상모듈·가상장비의 "
+        "2024년 및 2025년 사업보고서를 기준으로 주요 사업과 "
+        "제품·서비스의 변화를 비교해줘.")
+    assert literal_matrix_grammar(question) == (
+        companies, ("2024년", "2025년"), ("주요 사업", "제품·서비스"))
+
+    matrix_cells = tuple(
+        MatrixCellEvidence(
+            f"{company}-{topic}", f"{company} · 2025년", topic,
+            "확인한 사업 설명입니다.", ("20260310000001",))
+        for company in companies
+        for topic in ("주요 사업", "제품·서비스")
+    )
+    disclosure = _comprehensive_matrix_reduction_disclosure(
+        question, NarrativeMatrix(matrix_cells, (), "기간별 사업 비교"))
+    assert disclosure == (
+        "요청하신 2개 연도 중 최신 1개 연도만 한 번에 보여드립니다. "
+        "나머지는 연도를 지정해 다시 질문해 주세요.")

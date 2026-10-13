@@ -3,6 +3,8 @@
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from agent.deterministic_plan_compiler_v1 import compile_stage1_v1_generic
 from agent.semantic_intent_v1 import SemanticIntent
 from agent.stage1_v1_context_clarification_backend import (
@@ -38,11 +40,14 @@ def _intent(surface: str) -> SemanticIntent:
     }, strict=True)
 
 
-def _current_intent(field: str = "얼마") -> SemanticIntent:
+def _current_intent(
+        field: str = "얼마", *, as_of_expression: str | None = None,
+        ) -> SemanticIntent:
     payload = _intent("계약 금액").model_dump(mode="python")
     payload["answer_items"][0]["output"].update({
         "shape": "scalar", "field_surfaces": [field],
     })
+    payload["answer_items"][0]["scope"]["as_of_expression"] = as_of_expression
     return SemanticIntent.model_validate(payload, strict=True)
 
 
@@ -58,11 +63,65 @@ def test_current_contract_amount_confirms_corpus_date_without_value_kind():
     assert "2026-06-19" in authority.slots[-1].prompt
 
 
+def test_current_contract_amount_accepts_native_current_as_of_coordinate():
+    authority = MissingContextClarificationBackend(
+        corpus_cutoff="20260619").resolve(
+            question_id="synthetic", question="그 계약 금액이 지금 얼마야?",
+            source_intent=_current_intent(as_of_expression="지금"))
+    assert authority is not None
+    assert [slot.role_hint for slot in authority.slots] == [
+        "entity", "event", "timepoint"]
+
+
+def test_current_contract_amount_accepts_native_current_field_surface():
+    authority = MissingContextClarificationBackend(
+        corpus_cutoff="20260619").resolve(
+            question_id="synthetic", question="그 계약 금액이 지금 얼마야?",
+            source_intent=_current_intent("지금"))
+    assert authority is not None
+    assert [slot.role_hint for slot in authority.slots] == [
+        "entity", "event", "timepoint"]
+
+
+def test_current_contract_amount_accepts_alternate_current_wording():
+    authority = MissingContextClarificationBackend(
+        corpus_cutoff="20260619").resolve(
+            question_id="synthetic", question="그 계약 금액이 현재 얼마야?",
+            source_intent=_current_intent("현재"))
+    assert authority is not None
+    assert [slot.role_hint for slot in authority.slots] == [
+        "entity", "event", "timepoint"]
+
+
 def test_contract_amount_without_current_time_keeps_timepoint_question():
     authority = MissingContextClarificationBackend(
         corpus_cutoff="20260619").resolve(
             question_id="synthetic", question="그 계약 금액이 얼마야?",
             source_intent=_current_intent())
+    assert authority is not None
+    assert [slot.role_hint for slot in authority.slots] == [
+        "entity", "event", "value_kind", "timepoint"]
+
+
+@pytest.mark.parametrize(("question", "as_of"), [
+    ("그 계약 금액이 2025년 12월 31일에 얼마야?", "2025년 12월 31일"),
+    ("그 계약 금액이 얼마야?", "현재"),
+])
+def test_explicit_date_or_ungrounded_current_coordinate_is_not_discarded(question, as_of):
+    authority = MissingContextClarificationBackend(
+        corpus_cutoff="20260619").resolve(
+            question_id="synthetic", question=question,
+            source_intent=_current_intent(as_of_expression=as_of))
+
+    assert authority is None
+
+
+def test_current_field_without_current_word_does_not_infer_a_timepoint():
+    authority = MissingContextClarificationBackend(
+        corpus_cutoff="20260619").resolve(
+            question_id="synthetic", question="그 계약 금액이 얼마야?",
+            source_intent=_current_intent("현재"))
+
     assert authority is not None
     assert [slot.role_hint for slot in authority.slots] == [
         "entity", "event", "value_kind", "timepoint"]

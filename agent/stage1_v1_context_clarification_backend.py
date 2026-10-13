@@ -36,6 +36,26 @@ def _empty_scope(item: Any) -> bool:
     return _empty_coordinates(item) and not item.target.entity_refs
 
 
+def _empty_coordinates_or_explicit_current(item: Any, *, question: str) -> bool:
+    """Allow Stage1 to retain the question's literal ``지금/현재`` axis."""
+
+    as_of = "".join(str(item.scope.as_of_expression or "").split()).casefold()
+    return (
+        (item.scope.as_of_expression is None
+         or (as_of in {"지금", "현재"} and as_of in question))
+        and item.scope.document_group_expression is None
+        and not item.scope.target_period_expressions
+        and not item.scope.scope_qualifier_expressions
+        and item.selection is None
+        and not item.target.qualifier_surfaces
+    )
+
+
+def _empty_or_explicit_current_scope(item: Any, *, question: str) -> bool:
+    return (_empty_coordinates_or_explicit_current(item, question=question)
+            and not item.target.entity_refs)
+
+
 def _explicit_current_contract_amount(item: Any, question: str) -> bool:
     """A single stated contract amount at the available corpus cutoff.
 
@@ -46,17 +66,22 @@ def _explicit_current_contract_amount(item: Any, question: str) -> bool:
     target = "".join(item.target.surface.split()).casefold()
     field = "".join(item.output.field_surfaces[0].split()).casefold() \
         if len(item.output.field_surfaces) == 1 else ""
+    has_explicit_current_time = any(
+        marker in question for marker in ("지금", "현재"))
+    field_is_current_time = (
+        field in {"지금", "현재"} and has_explicit_current_time)
     return (
         item.target.kind == "metric"
         and item.operation == "retrieve"
         and item.output.shape == "scalar"
         and item.output.projection_mode == "named_fields"
-        and _empty_scope(item)
+        and _empty_or_explicit_current_scope(item, question=question)
         and "계약금액" in target
         and "해지금액" not in target
         and not any(word in target for word in ("변동", "차이", "증감"))
-        and field in {"계약금액", "금액", "얼마"}
-        and any(word in question for word in ("지금", "현재"))
+        and (field in {"계약금액", "금액", "얼마"}
+             or field_is_current_time)
+        and has_explicit_current_time
         and not any(word in question for word in ("변동", "차이", "증감"))
     )
 
@@ -328,7 +353,7 @@ class MissingContextClarificationBackend:
             if item.output.shape != "scalar":
                 return None
             is_contract_amount = (
-                _empty_coordinates(item)
+                _empty_coordinates_or_explicit_current(item, question=question)
                 and "계약" in normalized
                 and "금액" in normalized
             )
