@@ -2692,6 +2692,21 @@ def _validate_selected_event_intent(
         and item.scope.as_of_expression is None
         and item.output.shape == "scalar"
     )
+    missing_issuer_contract_amount = (
+        not intent.entities and not item.target.entity_refs
+        and item.target.kind == "metric"
+        and "계약금액" in re.sub(r"\s+", "", item.target.surface)
+        and "해지금액" not in re.sub(r"\s+", "", item.target.surface)
+        and not any(word in item.target.surface
+                    for word in ("변동", "차이", "증감"))
+        and not item.target.qualifier_surfaces
+        and not item.scope.target_period_expressions
+        and item.scope.as_of_expression is None
+        and item.output.shape == "scalar"
+        and len(item.output.field_surfaces) == 1
+        and re.sub(r"\s+", "", item.output.field_surfaces[0])
+            in {"계약금액", "금액", "얼마"}
+    )
     issuer_omitted_two_observation = (
         issuer is None
         and len(intent.entities) == 1
@@ -2704,7 +2719,8 @@ def _validate_selected_event_intent(
         and item.output.shape in {"record", "narrative", "comparison"}
     )
     if issuer is None and not (
-            missing_issuer_context or issuer_omitted_two_observation):
+            missing_issuer_context or missing_issuer_contract_amount
+            or issuer_omitted_two_observation):
         raise DeterministicPlanCompilerError(
             "selected event에는 issuer company entity 하나가 필요합니다")
     if intent.answer_groups or intent.unresolved_mentions:
@@ -2870,7 +2886,8 @@ def _validate_selected_event_intent(
         and not intent.premises
     )
     if not ((common and (
-            legacy or missing_issuer_context or two_observation_status
+            legacy or missing_issuer_context or missing_issuer_contract_amount
+            or two_observation_status
             or one_observation_status or partial_timeline
             or complete_timeline or event_attribute_record))
             or investment_judgment_exact_content):
@@ -9207,6 +9224,16 @@ def _build_selected_event_typed_plan(
     else:
         requested_slots = normalize_slot_names(
             _resolve_colloquial_slots(intent_item.output.field_surfaces))
+        # An issuer-less clarification can retain the user's short output
+        # surface ``금액`` while the target states ``계약금액`` exactly.  Bind
+        # that one field to the disclosed contract-amount slot, not to an
+        # unrelated generic amount label.
+        if (intent_item.target.kind == "metric"
+                and not intent_item.target.entity_refs
+                and "계약금액" in re.sub(
+                    r"\s+", "", intent_item.target.surface)
+                and requested_slots == ["금액"]):
+            requested_slots = ["계약금액"]
         # The literal 투자판단 관련 주요경영사항 form exposes its disclosed
         # body under ``2. 주요내용``.  Keep the semantic surface ``내용`` intact
         # (it is the user's literal request and grounding contract), but bind
@@ -15199,6 +15226,28 @@ _STAGE1_V1_STRUCTURAL_SPECS = (
             "entities": [],
             "answer_items": [{
                 "target": {"kind": "event", "entity_positions": [],
+                           "qualifier_count": 0},
+                "operation": "retrieve",
+                "scope": {"target_period_count": 0, "has_as_of": False,
+                          "has_document_group": False,
+                          "scope_qualifier_count": 0},
+                "selection": None,
+                "output": {"shape": "scalar",
+                           "projection_mode": "named_fields",
+                           "field_count": 1, "presentation": "auto"},
+            }],
+            "answer_groups": [], "premises": [], "unresolved_mentions": [],
+            "presentation": "auto",
+        }),
+        ("selected_event",), _validate_selected_event_intent,
+        _validate_selected_event_resolution, _lower_selected_event,
+    ),
+    (
+        "event/current-contract-amount-missing-issuer",
+        _structural_signature_from_payload({
+            "entities": [],
+            "answer_items": [{
+                "target": {"kind": "metric", "entity_positions": [],
                            "qualifier_count": 0},
                 "operation": "retrieve",
                 "scope": {"target_period_count": 0, "has_as_of": False,

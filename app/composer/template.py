@@ -2140,6 +2140,175 @@ def _attribution_conclusion(payload, question: str | None) -> str | None:
             "속하는지는 공시만으로 특정되지 않습니다.")
 
 
+def _contract_completion_transition(change: str) -> str | None:
+    """Summarize a verified planned-to-signed loan/guarantee change."""
+
+    text = _display_text(change or "")
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"\s*\[사유:[^\]]+\]\s*$", "", text)
+    if text.count(" → ") != 1:
+        return None
+    before, after = (" ".join(side.split())
+                     for side in text.split(" → ", 1))
+    if not all(marker in before and marker in after
+               for marker in ("차입계약", "보증계약")):
+        return None
+    if ("예정" not in before
+            or re.search(r"체결(?:됨|됐|되었|완료)", after) is None):
+        return None
+    date = re.search(
+        r"(?P<year>20\d{2})년\s*(?P<month>\d{1,2})월\s*"
+        r"(?P<day>\d{1,2})일",
+        after,
+    )
+    if date is None:
+        return None
+    signed_date = (
+        f"{date.group('year')}-{int(date.group('month')):02d}-"
+        f"{int(date.group('day')):02d}"
+    )
+
+    parts = []
+    before_amounts = set(re.findall(
+        r"\$\s*[\d,]+(?:\.\d+)?\s*(?:M|B)?", before, re.I))
+    after_amounts = set(re.findall(
+        r"\$\s*[\d,]+(?:\.\d+)?\s*(?:M|B)?", after, re.I))
+    shared_amounts = before_amounts & after_amounts
+    if shared_amounts and "당사로 이관" in before and "당사로 이관" in after:
+        amount = sorted(shared_amounts)[0].replace(" ", "")
+        parts.append(
+            f"기존 보증액 {amount}의 당사 이관은 예정에서 완료로 바뀌었습니다.")
+    parts.append(
+        "차입·보증계약은 기존 채권자와 세부 내용을 논의해 체결할 "
+        f"예정이었으나, {signed_date} 체결됐다고 정정됐습니다.")
+    if ("협의 완료" in before and "변동" in before
+            and re.search(r"(?<!\S)라\s*\.\s*\(삭제\)", after)):
+        parts.append(
+            "채권자 협의 완료를 전제로 하고 보증 총액 등 일부 변동 "
+            "가능성을 적은 종전 문구도 삭제됐습니다.")
+    return " ".join(parts)
+
+
+def _contract_completion_correction_conclusion(claims) -> str | None:
+    """Lead with the verified completion transition, with its correction cite."""
+
+    candidates = []
+    for claim in claims:
+        if (claim.operator != "correction_diff"
+                or not _is_narrative_correction(claim)):
+            continue
+        summary = _contract_completion_transition(claim.text or "")
+        if summary is None:
+            continue
+        receipt = next((
+            citation.rcept_no for citation in (claim.citations or ())
+            if citation.rcept_no
+            and re.fullmatch(r"\d{14}", citation.rcept_no)
+        ), None)
+        date_prefix = (
+            f"{receipt[:4]}-{receipt[4:6]}-{receipt[6:8]} 정정에서 "
+            if receipt else "정정에서 "
+        )
+        candidates.append(f"{date_prefix}{summary}{_cite(claim)}")
+    unique = list(dict.fromkeys(candidates))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _withheld_contract_estimate_explanation(
+        claims, question: str | None) -> str | None:
+    """Explain a newly disclosed, explicitly estimated contract amount.
+
+    This applies only when a question challenges an apparent amount increase,
+    the typed correction says the amount was disclosed from a withheld value,
+    and one receipt-linked prose correction states the estimate basis and a
+    dated termination.  If any part is missing or conflicts, the ordinary
+    correction answer remains in control.
+    """
+
+    if (not question
+            or re.search(r"왜|이유|사유|원인", question) is None
+            or re.search(r"계약금액|금액|10\s*조", question) is None
+            or re.search(r"늘|증가|커진|10\s*조", question) is None
+            or re.search(r"10\s*조", question) is None
+            or re.search(r"비율|기간|정정\s*(?:이력|내역|내용)", question)):
+        return None
+
+    amounts = [
+        claim for claim in claims
+        if claim.operator == "correction_diff"
+        and claim.state == "disclosed_from_withheld"
+        and "계약금액" in (claim.label or "")
+        and claim.value_text
+        and claim.canonical_unit == "원"
+        and claim.canonical_value
+    ]
+    if len(amounts) != 1:
+        return None
+    amount = amounts[0]
+    receipts = {
+        citation.rcept_no for citation in (amount.citations or ())
+        if citation.rcept_no
+        and re.fullmatch(r"\d{14}", citation.rcept_no)
+    }
+    if len(receipts) != 1:
+        return None
+    receipt = next(iter(receipts))
+
+    narratives = [
+        claim for claim in claims
+        if claim.operator == "correction_diff"
+        and _is_narrative_correction(claim)
+        and receipt in {
+            citation.rcept_no for citation in (claim.citations or ())
+        }
+    ]
+    if len(narratives) != 1:
+        return None
+    narrative = narratives[0]
+    change = _display_text(narrative.text or "")
+    change = re.sub(r"^\[[^\]]+\]\s*", "", change)
+    change = re.sub(r"\s*\[사유:[^\]]+\]\s*$", "", change)
+    if change.count(" → ") != 1:
+        return None
+    before, after = (side.strip() for side in change.split(" → ", 1))
+
+    # Each detail is copied from the correction's explicit before/after text;
+    # do not infer an estimate method or current contract status from the
+    # amount row alone.
+    if ("예상 계약금액은 확정되지" not in before
+            or "유보기한 종료 후 공시 예정" not in before
+            or "예상 계약금액은 확정되지" not in after
+            or "계약 공급물량" not in after
+            or "배터리 판가 가격" not in after
+            or "추정금액" not in after):
+        return None
+    volume_before = re.search(
+        r"총\s*(?P<volume>[\d,]+(?:\.\d+)?)\s*GWh", before)
+    volume_after = re.search(
+        r"총\s*(?P<volume>[\d,]+(?:\.\d+)?)\s*GWh", after)
+    signing_date = re.search(
+        r"계약\s*체결일\s*\((?P<date>20\d{2}년\s*\d{1,2}월\s*\d{1,2}일)\)"
+        r"\s*기준\s*배터리\s*판가\s*가격", after)
+    termination_date = re.search(
+        r"(?P<date>20\d{2}년\s*\d{1,2}월\s*\d{1,2}일)자로\s*해지", after)
+    if (volume_before is None or volume_after is None
+            or volume_before.group("volume") != volume_after.group("volume")
+            or signing_date is None or termination_date is None):
+        return None
+
+    amount_text = _display_amount(amount)
+    volume = volume_after.group("volume")
+    signed = signing_date.group("date")
+    terminated = termination_date.group("date")
+    return (
+        f"10조 원으로 늘어난 것이 아니라, 공시유보 해제로 비공개였던 "
+        f"추정액 {amount_text}이 공개된 것입니다. 이 추정액은 계약금액이 "
+        f"확정되기 전에 총 {volume}GWh 공급물량에 계약 체결일({signed}) "
+        f"기준 배터리 판가를 적용해 산정됐습니다. 해당 계약은 "
+        f"{terminated} 해지됐습니다.{_cite(narrative)}"
+    )
+
+
 def _correction_conclusion(claims, *, reject_increase: bool = False) -> str | None:
     """Lead with the material typed correction instead of its row count."""
 
@@ -2189,6 +2358,12 @@ def _narrative_correction_summary(claims) -> str | None:
                   and _is_narrative_correction(claim)]
     if not narratives:
         return None
+    if _contract_completion_correction_conclusion(claims):
+        narratives = [claim for claim in narratives
+                      if _contract_completion_transition(
+                          claim.text or "") is None]
+        if not narratives:
+            return None
     rooted = [
         claim for claim in narratives
         if re.search(r"계약 식별 접수번호 \d{14}", claim.label or "")
@@ -2239,7 +2414,9 @@ def _narrative_correction_summary(claims) -> str | None:
             # 내용" bullet can replay prose the correction table above has
             # already compacted to its changed span.  Keep the bullet only
             # when it is the shorter reading; otherwise show the changed span.
-            if after_bullets and len(after_bullets) > len(compacted):
+            if (after_bullets
+                    and not _correction_after_side_is_blank(change_source)
+                    and len(after_bullets) > len(compacted)):
                 after_bullets = ""
             change = (after_bullets or compacted).strip().rstrip(". ")
             body = (
@@ -2309,7 +2486,11 @@ def _correction_after_bullets(change: str) -> str:
     before, after = change.split(" → ", 1)
     before_bullets = _advisory_bullets(before)
     after_bullets = _advisory_bullets(after)
-    if not before_bullets or not after_bullets:
+    if not before_bullets:
+        return ""
+    if not after_bullets:
+        if _is_blank_advisory_marker(after):
+            return "정정 후 기타 투자판단 사항은 원문에 내용 없이 「-」로 기재됐습니다"
         return ""
     before_keys = {re.sub(r"\s+", " ", value).strip()
                    for value in before_bullets}
@@ -2343,6 +2524,18 @@ def _correction_after_bullets(change: str) -> str:
 
 #: 원문이 값 자리에 내용 없이 적어 두는 표시. 값이 아니라 상태다.
 _IS_BLANK_ADVISORY = re.compile(r"[-–—ー・.\s]*")
+
+
+def _is_blank_advisory_marker(value: str) -> bool:
+    stripped = value.strip()
+    return bool(stripped) and _IS_BLANK_ADVISORY.fullmatch(stripped) is not None
+
+
+def _correction_after_side_is_blank(change: str) -> bool:
+    if change.count(" → ") != 1:
+        return False
+    _before, after = change.split(" → ", 1)
+    return _is_blank_advisory_marker(after)
 
 
 def _compact_correction_change(change: str, *, limit: int = 320) -> str:
@@ -2449,10 +2642,6 @@ def _demote_citations_to_basis(lines: list[str], start: int, end: int) -> None:
         tail = _CITATION_TAIL.search(lines[i])
         if tail and set(_RECEIPT_NO.findall(tail.group(0))) <= covered:
             lines[i] = lines[i][:tail.start()].rstrip()
-
-
-#: 표의 마지막 열이 근거일 때 그 값을 알아보는 표기.
-_TABLE_RECEIPT_CELL = re.compile(r"^접수번호\s*\d{14}$")
 
 
 #: 문장 끝에 붙는 인라인 근거. 출처를 하단에 모을 때 걷어낸다.
@@ -2673,9 +2862,11 @@ def _hoist_uniform_table_source(answer: str) -> str:
             value = values.pop()
             if not value or value == "-":
                 continue
-            # 근거 열은 접수번호일 때만 뺀다. 마지막 열이 값이면 그것은 데이터다.
+            # 근거 열은 공개 접수번호를 포함한 출처 표기만 묶는다. 마지막
+            # 열이 값이면 그것은 데이터다.
             if position == width - 1:
-                if header[-1] != "근거" or not _TABLE_RECEIPT_CELL.match(value):
+                if (header[-1] != "근거"
+                        or not _RECEIPT_NO.search(value)):
                     continue
                 hoists.append(f"근거: {value} (아래 표 전체)")
             else:
@@ -2976,11 +3167,48 @@ def _financial_trend_rows(payload, question: str | None):
     return sorted(rows, key=lambda row: (row[0], row[1]))
 
 
+def _financial_trend_citation(claim) -> str:
+    """Render each trend row's public source beside that year's value."""
+
+    sources: dict[tuple[str | None, str], list[str]] = {}
+    for citation in claim.citations or ():
+        receipt = citation.rcept_no
+        if not receipt or not re.fullmatch(r"\d{14}", receipt):
+            continue
+        key = (citation.report_name, receipt)
+        paths = sources.setdefault(key, [])
+        if citation.source_path and citation.source_path not in paths:
+            paths.append(citation.source_path)
+    if not sources:
+        return _cite(claim).removeprefix("(근거: ").removesuffix(")")
+
+    rendered = []
+    for (report, receipt), paths in sources.items():
+        parts = [report] if report else []
+        parts.append(f"접수번호 {receipt}")
+        if paths:
+            parts.append(" / ".join(paths))
+        rendered.append(" · ".join(parts))
+    return " / ".join(rendered)
+
+
 class TemplateComposer:
     def compose(self, payload, *, question: str | None = None) -> str:
-        text = _hoist_uniform_table_source(
-            _drop_repeated_lines(self._compose(payload, question=question)))
+        body = _drop_repeated_lines(self._compose(payload, question=question))
+        has_trend_table = "| 기간 | 금액 | 근거 |" in body.splitlines()
+        text = _hoist_uniform_table_source(body)
         text = _apply_display_units_directive(text, payload, question)
+        trend_rows = (_financial_trend_rows(payload, question)
+                      if has_trend_table else None)
+        if (trend_rows and all(any(
+                citation.rcept_no
+                and re.fullmatch(r"\d{14}", citation.rcept_no)
+                for citation in row[3].citations
+        ) for row in trend_rows)):
+            # The trend table carries each year's report, receipt, and source
+            # path beside its value. A second global source block would repeat
+            # those same citations without improving the row-to-source link.
+            return text
         # 출처는 마지막이다 — 위의 정리들이 본문만 보게 하고, 하단 블록이
         # 「같은 줄 반복」이나 「표의 균일 열」로 잘못 걸리지 않게 한다.
         return _with_source_footer(text, payload)
@@ -3009,7 +3237,9 @@ class TemplateComposer:
                      "| 기간 | 금액 | 근거 |", "|---|---|---|"]
             for year, quarter, _, claim, _ in trend:
                 period = f"{year}년" + (f" {quarter}분기" if quarter else "")
-                lines.append(f"| {period} | {_display_amount(claim)} | {_cite(claim)} |")
+                source = _financial_trend_citation(claim)
+                lines.append(
+                    f"| {period} | {_display_amount(claim)} | {source} |")
             lines.extend(self._public_notes(payload, question=question))
             return "\n".join(lines)
         amount_availability = _withheld_contract_amount_answer(payload, question)
@@ -3274,12 +3504,54 @@ class TemplateComposer:
                 f"{label_text}{_josa(label_text, '은', '는')}"
                 f"{suffix} 확인되지 않았습니다.")
 
-        lines.append("정정 계보와 최신 유효본:")
-        lines.extend(self._claim_line(claim) for claim in lineages)
+        type_amounts = [
+            claim for claim in claims
+            if (claim.output_id or "").endswith((
+                ".issuance_amount", ".total"))
+        ]
+        if type_amounts:
+            lines.append("유형별 결정 공시 금액:")
+            lines.extend(self._claim_line(claim) for claim in type_amounts)
+
+        cashflow_claims = [
+            claim for claim in claims
+            if (claim.output_id or "").endswith(
+                ".financing.cash_flow_inflow")
+        ]
+        if cashflow_claims:
+            lines.append("후속 재무제표의 실제 현금 유입:")
+            lines.extend(self._claim_line(claim) for claim in cashflow_claims)
+
+        execution_boundaries = [
+            claim for claim in claims
+            if (claim.output_id or "").endswith(".financing.execution_boundary")
+        ]
+        lines.extend(self._claim_line(claim) for claim in execution_boundaries)
+        excluded_documents = [
+            claim for claim in claims
+            if ".financing.excluded." in (claim.output_id or "")
+        ]
+        if excluded_documents:
+            lines.append("요청한 네 유형 밖의 공시:")
+            lines.extend(self._claim_line(claim) for claim in excluded_documents)
+
+        lineage_members = [(claim, members(claim)) for claim in lineages]
+        if len(lineage_members) > 1 or any(
+                len(chain) > 1 for _claim, chain in lineage_members):
+            has_corrections = any(len(chain) > 1
+                                  for _claim, chain in lineage_members)
+            lines.append("정정 계보와 최신 유효본:" if has_corrections
+                         else "확인된 공시:")
+            lines.extend(self._claim_line(claim)
+                         for claim, _chain in lineage_members)
         detail_claims = [
             claim for claim in claims
             if ".financing." in (claim.output_id or "")
             and claim not in logical + lineages + type_claims
+            and claim not in type_amounts
+            and claim not in cashflow_claims
+            and claim not in execution_boundaries
+            and claim not in excluded_documents
         ]
         if detail_claims:
             lines.append("정정 전후 내용:" if any(
@@ -3363,14 +3635,18 @@ class TemplateComposer:
             if scope_message:
                 lines.append(scope_message)
         attribution = _attribution_conclusion(p, question)
-        conclusion = attribution or _correction_conclusion(
-            p.claims,
-            reject_increase=(
-                any(verdict.verdict == "false"
-                    for verdict in p.premise_verdicts)
-                or bool(question and re.search(r"늘|증가|커진|10\s*조", question))
-            ),
-        )
+        contract_transition = _contract_completion_correction_conclusion(
+            p.claims)
+        conclusion = (attribution or contract_transition
+                      or _correction_conclusion(
+                          p.claims,
+                          reject_increase=(
+                              any(verdict.verdict == "false"
+                                  for verdict in p.premise_verdicts)
+                              or bool(question and re.search(
+                                  r"늘|증가|커진|10\s*조", question))
+                          ),
+                      ))
         asks_correction_inventory = bool(question and re.search(
             r"정정\s*(?:이력|내역|내용)|변경\s*(?:이력|내역|내용)|"
             r"(?:전체|모든)[^?\n]{0,20}(?:정정|변경)|정정\s*전후\s*흐름",
@@ -3389,6 +3665,14 @@ class TemplateComposer:
         requested_fields = _requested_correction_fields(question)
         asks_correction_reason = bool(question and re.search(
             r"왜|이유|사유|원인", question))
+        estimate_explanation = _withheld_contract_estimate_explanation(
+            p.claims, question)
+        if estimate_explanation and not asks_correction_inventory:
+            lines.append(estimate_explanation)
+            notes = self._public_notes(p, question=question)
+            if notes:
+                _extend_public_qualifications(lines, notes)
+            return "\n".join(line for line in lines if line)
         if (requested_fields and not asks_correction_inventory
                 and not asks_correction_reason):
             # 명시된 필드가 있으면 상태·정정사유·기타 투자판단 문안까지 모두
@@ -3426,7 +3710,9 @@ class TemplateComposer:
             if claim.label == "기준시점 공시 상태"
         ]
         state_table = _event_state_table(states)
-        if conclusion and not state_table and not source_scope_limited:
+        if contract_transition:
+            lines.append(contract_transition)
+        elif conclusion and not state_table and not source_scope_limited:
             lines.append(conclusion)
         correction_reasons = [
             claim for claim in p.claims

@@ -48,7 +48,7 @@ MAX_NARRATIVE_MATRIX_CELLS = 16
 
 _EXPLICIT_MATRIX_HEAD = re.compile(
     r"^(?P<companies>.+?)\s*의\s*"
-    r"(?P<year1>(?:19|20)[0-9]{2}년)\s*(?:과|와|,)\s*"
+    r"(?P<year1>(?:19|20)[0-9]{2}년)\s*(?:과|와|및|,)\s*"
     r"(?P<year2>(?:19|20)[0-9]{2}년)",
 )
 _EXPLICIT_MATRIX_RANGE_HEAD = re.compile(

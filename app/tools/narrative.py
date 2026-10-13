@@ -243,6 +243,17 @@ class InvestmentAggregationRequest:
 
 
 @dataclass(frozen=True)
+class InvestmentTableComponent:
+    """One individually identified row included in a verified investment sum."""
+
+    label: str
+    value: Decimal
+    unit: str
+    value_won: Decimal
+    source_excerpt: str
+
+
+@dataclass(frozen=True)
 class InvestmentTableAggregate:
     """Exact deterministic sum of one structurally proved amount column."""
 
@@ -250,6 +261,7 @@ class InvestmentTableAggregate:
     value: Decimal
     unit: str
     value_won: Decimal
+    components: tuple[InvestmentTableComponent, ...]
 
 
 _INVESTMENT_UNIT_SCALE = {
@@ -261,10 +273,10 @@ _INVESTMENT_UNIT_SCALE = {
 _INVESTMENT_TOTAL_MARKERS = frozenset({"소계", "합계", "총계"})
 
 
-def _adjacent_investment_table_unit(
+def _adjacent_investment_unit_declaration(
         lines: list[str], table_start: int,
-        ) -> str | None:
-    """Read a unit only from the structural block adjacent to the table."""
+        ) -> tuple[int, str] | None:
+    """Return the exact source line declaring a unit next to one table."""
 
     before = table_start - 1
     blank_gap = 0
@@ -285,8 +297,21 @@ def _adjacent_investment_table_unit(
     unit_label = re.search(r"단위\s*[:：]?", carrier)
     if unit_label is None:
         return None
-    matches = set(re.findall(
-        r"백만원|천원|억원|원", carrier[unit_label.end():]))
+    return before, carrier
+
+
+def _adjacent_investment_table_unit(
+        lines: list[str], table_start: int,
+        ) -> str | None:
+    """Read a unit only from the structural block adjacent to the table."""
+
+    declaration = _adjacent_investment_unit_declaration(lines, table_start)
+    if declaration is None:
+        return None
+    carrier = declaration[1]
+    unit_label = re.search(r"단위\s*[:：]?", carrier)
+    assert unit_label is not None
+    matches = set(re.findall(r"백만원|천원|억원|원", carrier[unit_label.end():]))
     return next(iter(matches)) if len(matches) == 1 else None
 
 
@@ -347,11 +372,14 @@ def _aggregate_investment_table(
         return None
 
     start, end, header, positions = tables[0]
+    unit_declaration = _adjacent_investment_unit_declaration(lines, start)
     table_unit = _adjacent_investment_table_unit(lines, start)
     amount_pos = positions["금액"]
     values_won: list[Decimal] = []
     display_values: list[tuple[Decimal, str]] = []
-    for line in lines[start + 2:end]:
+    components: list[InvestmentTableComponent] = []
+    for row_index in range(start + 2, end):
+        line = lines[row_index]
         cells = _table_cells(line)
         if len(cells) != len(header):
             return None
@@ -371,9 +399,26 @@ def _aggregate_investment_table(
         unit = numeric.group("unit") or table_unit
         if unit not in _INVESTMENT_UNIT_SCALE:
             return None
+        label = " ".join(cells[positions["투자대상"]].split())
+        if not label or label in {"-", "–", "—", "―", "."}:
+            return None
         value = Decimal(numeric.group("value").replace(",", ""))
-        values_won.append(value * _INVESTMENT_UNIT_SCALE[unit])
+        value_won = value * _INVESTMENT_UNIT_SCALE[unit]
+        values_won.append(value_won)
         display_values.append((value, unit))
+        excerpt_lines = []
+        if table_unit is not None and unit_declaration is not None:
+            unit_index = unit_declaration[0]
+            excerpt_lines.append(lines[unit_index])
+            if (unit_index + 1 < start
+                    and _is_table_rule(_table_cells(lines[unit_index + 1]))):
+                excerpt_lines.append(lines[unit_index + 1])
+        excerpt_lines.extend(lines[start:start + 2])
+        excerpt_lines.append(line)
+        components.append(InvestmentTableComponent(
+            label=label, value=value, unit=unit, value_won=value_won,
+            source_excerpt="\n".join(excerpt_lines),
+        ))
     if (not values_won
             or (request.expected_row_count is not None
                 and len(values_won) != request.expected_row_count)):
@@ -390,6 +435,7 @@ def _aggregate_investment_table(
     return InvestmentTableAggregate(
         row_count=len(values_won), value=display_value,
         unit=display_unit, value_won=sum(values_won, Decimal(0)),
+        components=tuple(components),
     )
 
 
@@ -399,6 +445,31 @@ def _format_investment_decimal(value: Decimal) -> str:
     grouped = f"{int(integer):,}"
     fraction = fraction.rstrip("0")
     return f"{grouped}.{fraction}" if dot and fraction else grouped
+
+
+def _investment_sum_component_claims(
+        *, task_id: str, corp_name: str, aggregate: InvestmentTableAggregate,
+        doc_id: str, receipt: str, section_id: str, locator: str,
+        ) -> tuple[AnswerClaim, ...]:
+    """Expose each verified sum operand with its own source-row excerpt."""
+
+    claims = []
+    for index, component in enumerate(aggregate.components, start=1):
+        claims.append(AnswerClaim(
+            output_id=f"{task_id}.investment-sum.component-{index}",
+            label=(f"{corp_name} 투자계획 구성항목 {index} · "
+                   f"{component.label}"),
+            value_text=_format_investment_decimal(component.value),
+            raw_unit=component.unit,
+            canonical_value=format(component.value_won, "f"),
+            canonical_unit="원",
+            citations=[ClaimCitation(
+                doc_id=doc_id, rcept_no=receipt, section_id=section_id,
+                locator=locator, excerpt_prompt_safe=component.source_excerpt,
+                verification="source_roundtrip",
+            )],
+        ))
+    return tuple(claims)
 
 
 def _disclosed_metric_match_keys(retrieval_query: str) -> tuple[str, ...]:
@@ -551,7 +622,17 @@ class NarrativeTool:
             return tuple(ordered)[:TOP_K]
 
         hits = _collect_sections(section_hints)
-        if not hits or all(_bearing_rank(h) > 0 for h in hits):
+        # A broad chapter hint (for example 「II. 사업의 내용」) is only a
+        # discovery area, so an alias-only hit can justify searching the rest
+        # of the selected report for a more exact topic match. A numbered,
+        # topic-specific subsection such as 「III. 재무 > 7. 증권 발행」 is
+        # already the authority boundary; widening it can mix in a different
+        # section with a similar word (CG-047: securities issuance vs liquidity
+        # funding). If that exact subtree has no lexical hit, fail closed.
+        has_broad_section_hint = any(
+            ">" not in str(path_prefix) for path_prefix in section_hints)
+        if (has_broad_section_hint
+                and (not hits or all(_bearing_rank(h) > 0 for h in hits))):
             # 「II. 사업의 내용」에 표기 자체가 없고 별칭만 스친 경우(한화오션 신규수주는
             # 재무 주석 표에만 있다) 문서 전체에서 다시 찾아 정본 표기 chunk 를 앞세운다.
             whole = _collect(None)
@@ -681,6 +762,7 @@ class NarrativeTool:
         claims, lims, used = [], [], []
         missing_cells: list[str] = []
         completed_cells: list[str] = []
+        proved_topic_slots: set[str] = set()
         cell_claim_output_ids: list[tuple[str, tuple[str, ...]]] = []
         if fanout.omitted_cells:
             lims.append(Limitation(
@@ -713,6 +795,7 @@ class NarrativeTool:
                 as_of=task.as_of,
                 retrieval_query=cell.topic,
                 operation=task.operation,
+                matrix_cell=matrix,
                 # In matrix mode slots must be checked across all cells, not
                 # repeated as a false per-cell omission.
                 requested_slots=[] if matrix else task.requested_slots,
@@ -724,6 +807,11 @@ class NarrativeTool:
                 aggregation_request=(
                     aggregation_request if not matrix else None))
             if cell_claims:
+                proved_topic_slots.update(_authority_bound_requested_slots(
+                    SimpleNamespace(
+                        retrieval_query=cell.topic,
+                        requested_slots=task.requested_slots),
+                    _narrative_authority_kind(cell_task)))
                 completed_cells.append(cell.cell_id)
                 cell_claim_output_ids.append((
                     cell.cell_id, tuple(claim.output_id for claim in cell_claims)))
@@ -762,7 +850,9 @@ class NarrativeTool:
         if (matrix and task.requested_slots and claims
                 and not topic_bound_fields):
             body = " ".join(claim.text or "" for claim in claims)
-            missing_slots = [slot for slot in task.requested_slots if not _slot_present(slot, body)]
+            missing_slots = [slot for slot in task.requested_slots
+                             if slot not in proved_topic_slots
+                             and not _slot_present(slot, body)]
             if missing_slots:
                 lims.append(Limitation(
                     code="slot_not_confirmed",
@@ -805,6 +895,7 @@ class NarrativeTool:
             aggregation_request: InvestmentAggregationRequest | None = None,
             ):
         claims, lims, used = [], [], []
+        requested_max_blocks = max_blocks
         proved_empty_selection = False
         corp_codes = tuple(task.corp_codes)
         ds = task.document_selector
@@ -821,6 +912,23 @@ class NarrativeTool:
             # This is an execution-only budget; no public QueryPlan field or
             # long-narrative guard is changed.
             max_blocks = min(max_blocks, 1)
+        if (authority_kind == "business_axis"
+                and _business_axis_kind(task.retrieval_query)
+                in {"business", "products"}
+                and ds is not None and getattr(ds, "rcept_no", None)):
+            # A business/product cell normally uses one structural block. If
+            # this exact filing explicitly sends readers to subsidiary product
+            # details, retain the issuer's own business block plus each
+            # labelled product section authorized by that reference.
+            exact_rows = self._cached_exact_document_chunks(task)
+            referenced_product_ids = _referenced_subsidiary_product_chunk_ids(
+                exact_rows)
+            holding_role_ids = _referenced_holding_product_role_chunk_ids(
+                exact_rows)
+            if referenced_product_ids or holding_role_ids:
+                max_blocks = min(
+                    requested_max_blocks,
+                    1 + len(referenced_product_ids) + len(holding_role_ids))
         # periods(compare): 각 기간별로 검색 (기간 종료일을 as_of 상한처럼 쓰지 않는다 — 문서 접수일 필터는 as_of)
         period_windows = []
         if task.periods:
@@ -923,6 +1031,13 @@ class NarrativeTool:
                         hits = structural_hits
             if ds and ds.form:
                 hits = tuple(h for h in hits if _form_of(self.rm, h.doc_id, ds.form))
+            if pr is not None and getattr(task, "matrix_cell", False):
+                # A year-labelled matrix cell must not borrow a filing from
+                # the following year's discovery window.  In particular, a
+                # half-year filing cannot stand in for the prior annual
+                # endpoint and then be subtracted from the next annual one.
+                hits = tuple(h for h in hits if _matches_matrix_period(
+                    self.rm, h.doc_id, pr))
             if pr is not None and ds and ds.form and "사업보고서" in ds.form:
                 # A fiscal-period comparison must bind to that fiscal year's
                 # annual report, not merely any annual report filed within the
@@ -1032,6 +1147,13 @@ class NarrativeTool:
                         continue
                     period_claim_count += 1
                     output_id = f"{task.task_id}.investment-sum"
+                    component_claims = _investment_sum_component_claims(
+                        task_id=task.task_id, corp_name=corp_name,
+                        aggregate=aggregate, doc_id=sec.doc_id,
+                        receipt=rc, section_id=sec.section_id,
+                        locator=h.locator or sec.locator,
+                    )
+                    claims.extend(component_claims)
                     claims.append(AnswerClaim(
                         output_id=output_id,
                         label=(
@@ -1042,6 +1164,8 @@ class NarrativeTool:
                         canonical_value=format(aggregate.value_won, "f"),
                         canonical_unit="원",
                         operator="sum",
+                        derived_from=[claim.output_id
+                                      for claim in component_claims],
                         citations=[ClaimCitation(
                             doc_id=sec.doc_id, rcept_no=rc,
                             section_id=sec.section_id,
@@ -1118,6 +1242,10 @@ class NarrativeTool:
                         text=public_block,
                         citations=[ClaimCitation(doc_id=sec.doc_id, rcept_no=rc,
                                                  section_id=sec.section_id,
+                                                 report_name=(
+                                                     self.rm.document_label(sec.doc_id)
+                                                     if callable(getattr(self.rm, "document_label", None))
+                                                     else None),
                                                  locator=h.locator or sec.locator,
                                                  excerpt_prompt_safe=public_block if described_subject else _safe_excerpt(
                                                      public_block,
@@ -1398,6 +1526,19 @@ def _authority_bound_requested_slots(task, authority_kind: str | None) -> tuple[
         return ()
     query = getattr(task, "retrieval_query", "")
     query_key = _compact_heading(query)
+    if authority_kind is None and len(slots) == 1:
+        # A disclosed-metric query has its own ontology-backed retrieval path.
+        # When its sole requested slot names that same topic, a matched source
+        # chunk can prove the topic even if the filing repeats the heading only
+        # in its canonical path and not in every individual table row.
+        metric = disclosed_metric_for_query(query)
+        metric_keys = {
+            _compact_heading(surface)
+            for surface in getattr(metric, "surfaces", ()) if surface
+        } if metric is not None else set()
+        if (query_key in metric_keys
+                and _compact_heading(slots[0]) in metric_keys):
+            return slots
     if authority_kind == "business_axis":
         query_kind = _business_axis_kind(query)
         if query_kind in {"business", "products", "revenue", "subsidiaries"}:
@@ -1581,6 +1722,8 @@ def _business_axis_kind(retrieval_query: str) -> str:
         return "revenue"
     if "제품" in compact or "서비스" in compact:
         return "products"
+    if re.fullmatch(r"(?:주요|핵심)?사업(?:의)?(?:내용|개요|부문)?", compact):
+        return "business"
     # A non-boilerplate topic together with an otherwise business-shaped
     # request (e.g. a technology, energy source or product family) requires a
     # locally stated business activity, not merely a shareholder reference.
@@ -1632,6 +1775,212 @@ def _has_substantive_product_map(body: str) -> bool:
             and _count_markers(prose, (
                 "서비스", "제품", "검색", "커머스", "콘텐츠", "플랫폼",
                 "제조", "생산", "판매", "공급")) >= 3)
+
+
+def _has_explicit_subsidiary_product_detail(text: str) -> bool:
+    """Whether a block actually contains the subsidiary product subsection."""
+
+    body = _strip_prompt_boundaries(text)
+    heading = re.search(
+        r"(?:^|\s)2\s*[.)]?\s*주요\s*제품\s*(?:및|과)\s*서비스",
+        body,
+    )
+    if heading is None:
+        return False
+    excerpt = body[heading.end():heading.end() + NARRATIVE_BLOCK_CHARS]
+    if _has_substantive_product_map(excerpt):
+        return True
+    lines = excerpt.splitlines()
+    for index, line in enumerate(lines[:-2]):
+        if (not line.lstrip().startswith("|")
+                or not lines[index + 1].lstrip().startswith("|")
+                or not _is_table_rule(_table_cells(lines[index + 1]))):
+            continue
+        header = _table_cells(line)
+        product_columns = [
+            pos for pos, cell in enumerate(header)
+            if any(marker in _compact_heading(cell)
+                   for marker in ("제품", "품목", "상품", "서비스"))
+        ]
+        if len(product_columns) != 1:
+            continue
+        end = index + 2
+        while end < len(lines) and lines[end].lstrip().startswith("|"):
+            end += 1
+        entries = {
+            _compact_heading(cells[product_columns[0]])
+            for row in lines[index + 2:end]
+            if len(cells := _table_cells(row)) == len(header)
+            and not _is_table_rule(cells)
+            and _compact_heading(cells[product_columns[0]])
+            not in {"", "기타", "합계", "소계", "총계"}
+        }
+        if entries:
+            return True
+    # Some subsidiaries disclose a short prose-only service description under
+    # the same explicit heading rather than a table (for example, a sales
+    # subsidiary). Keep that sentence only when it names both an offering and
+    # an operating action.
+    return bool(re.search(
+        r"(?:제품|서비스|소재|품목|단조품|합금).{0,120}"
+        r"(?:생산|제조|판매|유통|공급|제공)|"
+        r"(?:생산|제조|판매|유통|공급|제공).{0,120}"
+        r"(?:제품|서비스|소재|품목|단조품|합금)",
+        excerpt,
+    ))
+
+
+def _referenced_subsidiary_product_excerpt(text: str) -> str | None:
+    """Keep a subsidiary label and its product section, not its whole appendix.
+
+    Cross-referenced Section-7 chunks can also contain industry outlook, risk,
+    financial and patent material. For a broad business answer, use only the
+    contiguous subsidiary profile from its ``1. 사업의 개요`` heading through
+    the end of ``2. 주요 제품 및 서비스``. Require the standalone company
+    label immediately before that profile so the products cannot be presented
+    as the holding company's own.
+    """
+
+    body = _strip_prompt_boundaries(text)
+    product = re.search(
+        r"(?<!\S)(2\s*[.)]?\s*주요\s*제품\s*(?:및|과)\s*서비스)", body)
+    if product is None:
+        return None
+    before_product = body[:product.start()]
+    overview_matches = tuple(re.finditer(
+        r"(?<!\S)1\s*[.)]?\s*사업의\s*개요", before_product))
+    if not overview_matches:
+        return None
+    overview = overview_matches[-1]
+    preceding_lines = [line.strip() for line in
+                       before_product[:overview.start()].splitlines()
+                       if line.strip()]
+    if not preceding_lines:
+        return None
+    company_label = preceding_lines[-1]
+    # A section heading, sentence, or table fragment is not a safe subsidiary
+    # label. DART profiles use legal-name forms (including English entities).
+    if (len(company_label) > 100
+            or re.match(r"^(?:[가-하]\.|\d+[.)]|\|)", company_label)
+            or company_label.endswith(("다.", "니다.", "습니다."))
+            or not any(marker in company_label for marker in (
+                "(주)", "㈜", "주식회사", "Inc.", "Inc", "Co.", "Ltd.",
+                "LCC", "LLC"))):
+        return None
+
+    after_product = body[product.end():]
+    next_section = re.search(
+        r"(?<!\S)[3-7]\s*[.)]\s*"
+        r"(?=(?:원재료|매출|위험|주요계약|연구개발|기타참고사항))",
+        after_product,
+    )
+    product_end = product.end() + next_section.start() if next_section else len(body)
+    excerpt = body[overview.start():product_end].strip()
+    if not excerpt or not _has_explicit_subsidiary_product_detail(excerpt):
+        return None
+    return _wrap_prompt_safe(f"{company_label}\n\n{excerpt}")
+
+
+def _referenced_holding_product_role_excerpt(text: str) -> str | None:
+    """Keep the holding-company role sentence before its affiliate hand-off."""
+
+    body = _strip_prompt_boundaries(text)
+    start = re.search(
+        r"(?<!\S)([가-하]\.\s*당사\s*주요\s*(?:제품|사업)[^\n]*)", body)
+    if start is None:
+        return None
+    next_subsidiary = re.search(
+        r"(?<!\S)[가-하]\.\s*종속(?:기업|회사)[^\n]*주요\s*제품",
+        body[start.end():],
+    )
+    if next_subsidiary is None:
+        return None
+    excerpt = body[start.start():start.end() + next_subsidiary.start()].strip()
+    compact = _compact_heading(excerpt)
+    if ("자회사" not in compact
+            or "지배" not in compact
+            or not any(marker in compact for marker in (
+                "투자", "경영자문", "경영관리", "경영전략"))):
+        return None
+    return _wrap_prompt_safe(excerpt)
+
+
+def _has_explicit_subsidiary_product_reference(rows) -> bool:
+    return any(
+        "사업의내용" in _compact_heading(getattr(row, "path", ""))
+        and "주요제품" in _compact_heading(getattr(row, "path", ""))
+        and "종속" in _compact_heading(getattr(row, "text_prompt_safe", ""))
+        and "기타참고사항" in _compact_heading(
+            getattr(row, "text_prompt_safe", ""))
+        and "참고하시기바랍니다" in _compact_heading(
+            getattr(row, "text_prompt_safe", ""))
+        for row in rows
+    )
+
+
+def _referenced_holding_product_role_chunk_ids(rows) -> frozenset[str]:
+    """Authorize a parent role paragraph only when it points to its appendix."""
+
+    rows = tuple(rows or ())
+    doc_ids = {getattr(row, "doc_id", None) for row in rows}
+    if (len(doc_ids) != 1 or None in doc_ids
+            or not _has_explicit_subsidiary_product_reference(rows)):
+        return frozenset()
+    return frozenset(
+        row.chunk_id for row in rows
+        if getattr(row, "chunk_id", None)
+        and "사업의내용" in _compact_heading(getattr(row, "path", ""))
+        and "주요제품" in _compact_heading(getattr(row, "path", ""))
+        and _referenced_holding_product_role_excerpt(
+            getattr(row, "text_prompt_safe", "")) is not None
+    )
+
+
+def _referenced_subsidiary_product_chunk_ids(rows) -> frozenset[str]:
+    """Authorize appendix product blocks only when this filing points to them.
+
+    A few holding-company reports put their own activities under section 2 and
+    explicitly direct readers to section 7 for subsidiary products. Section 7
+    is otherwise excluded from business-axis retrieval because it contains
+    unrelated industry, R&D, risk, and outlook material. Follow only that
+    same-document cross-reference, and only its labelled subsidiary product
+    blocks.
+    """
+
+    rows = tuple(rows or ())
+    doc_ids = {getattr(row, "doc_id", None) for row in rows}
+    if len(doc_ids) != 1 or None in doc_ids:
+        return frozenset()
+    if not _has_explicit_subsidiary_product_reference(rows):
+        return frozenset()
+
+    by_section: dict[str, list[tuple[int, object]]] = {}
+    for index, row in enumerate(rows):
+        section_id = getattr(row, "section_id", None)
+        path = _compact_heading(getattr(row, "path", ""))
+        if (not section_id or "사업의내용" not in path
+                or "기타참고사항" not in path):
+            continue
+        by_section.setdefault(section_id, []).append((index, row))
+
+    allowed: set[str] = set()
+    for section_rows in by_section.values():
+        section_rows.sort(key=lambda item: (
+            int(match.group(1)) if (match := re.search(
+                r"/PART\[(\d+)\]$", getattr(item[1], "locator", "")))
+            else item[0]))
+        subsidiary_start = next((position for position, (_index, row)
+                                 in enumerate(section_rows)
+                                 if "주요종속회사사업의내용" in _compact_heading(
+                                     getattr(row, "text_prompt_safe", ""))), None)
+        if subsidiary_start is None:
+            continue
+        for _index, row in section_rows[subsidiary_start:]:
+            chunk_id = getattr(row, "chunk_id", None)
+            if (chunk_id and _has_explicit_subsidiary_product_detail(
+                    getattr(row, "text_prompt_safe", ""))):
+                allowed.add(chunk_id)
+    return frozenset(allowed)
 
 
 def _topic_has_local_activity(body: str, anchors: tuple[str, ...]) -> bool:
@@ -1699,7 +2048,9 @@ def _is_business_narrative_query(retrieval_query: str, *, exact_document: bool =
     return exact_document and bool(_business_axis_anchors(retrieval_query))
 
 
-def _business_axis_score(task, row) -> int:
+def _business_axis_score(
+        task, row, *, allow_subsidiary_products: bool = False,
+        allow_holding_product_role: bool = False) -> int:
     """Rank a Section-II chunk only when it proves the requested business axis.
 
     The path says which disclosure child a chunk belongs to; its own leading
@@ -1716,6 +2067,20 @@ def _business_axis_score(task, row) -> int:
     body = _business_text(row)
     child_score = _business_child_score(getattr(row, "path", ""))
     kind = _business_axis_kind(query)
+    referenced_subsidiary_products = (
+        allow_subsidiary_products and kind in {"business", "products"}
+        and "기타참고사항" in path
+        and _has_explicit_subsidiary_product_detail(
+            getattr(row, "text_prompt_safe", None)
+            or getattr(row, "text", ""))
+    )
+    referenced_holding_product_role = (
+        allow_holding_product_role and kind in {"business", "products"}
+        and "주요제품" in path
+        and _referenced_holding_product_role_excerpt(
+            getattr(row, "text_prompt_safe", None)
+            or getattr(row, "text", "")) is not None
+    )
 
     # The corp_code filter proves which filing owns a chunk; it does not prove
     # that a paragraph inside a consolidated filing describes the selected
@@ -1766,6 +2131,15 @@ def _business_axis_score(task, row) -> int:
         child_score += 34
     elif kind == "business" and ("부문별손익" in path or "영업실적" in path):
         child_score -= 28
+    if child_score <= 0 and referenced_subsidiary_products:
+        # Section 7 is not a business authority by default. The exception is
+        # a labelled product subsection in the same filing, reached only
+        # through its explicit section-2 cross-reference.
+        child_score = 24
+    elif child_score <= 0 and referenced_holding_product_role:
+        # Keep the holding company's own role paragraph, but not its appendix
+        # pointer or any cross-company products in that source chunk.
+        child_score = 30
 
     # An exact receipt is not sufficient authority for a business answer when
     # it only supplies a finance/reference/R&D child.  A topic may use another
@@ -1782,7 +2156,15 @@ def _business_axis_score(task, row) -> int:
         elif term in body:
             score += 1
     anchor_hits = 0
+    required_anchor_count = 0
     for anchor in anchors:
+        if (referenced_subsidiary_products and expected_corp
+                and _compact_heading(anchor) == expected_corp):
+            # The issuer name identifies the filing subject, not the owner of
+            # every paragraph in it. An explicitly cross-referenced subsidiary
+            # product section is allowed to name that subsidiary instead.
+            continue
+        required_anchor_count += 1
         if anchor in path:
             anchor_hits += 1
             score += 12
@@ -1792,7 +2174,7 @@ def _business_axis_score(task, row) -> int:
     # Unknown, issuer-neutral industry topics (for example a technology or
     # energy term) are strict anchors.  They must not silently degrade to a
     # generic business overview or an unrelated disclosure section.
-    if anchors and not anchor_hits:
+    if required_anchor_count and not anchor_hits:
         return 0
     if kind == "subsidiaries":
         # A historical sentence saying that one company became a subsidiary is
@@ -1843,7 +2225,7 @@ def _business_axis_score(task, row) -> int:
         # 발행인에도 같은 규칙이 적용된다.
         product_markers = (
             "주요제품", "제품및서비스", "제품", "상품", "서비스", "품목", "브랜드")
-        head = body[:1800]
+        head = body[:NARRATIVE_BLOCK_CHARS if referenced_subsidiary_products else 1800]
         if not _count_markers(path + head, product_markers):
             return 0
         if "주요제품" in path or "제품및서비스" in path:
@@ -2268,7 +2650,14 @@ def _prioritize_authority_hits(
     if authority_kind == "business_axis":
         return tuple(sorted(
             hits,
-            key=lambda hit: (-_business_axis_score(task, hit), hit.rank, hit.rcept_dt, hit.chunk_id),
+            key=lambda hit: (
+                -_business_axis_score(
+                    task, hit,
+                    allow_subsidiary_products=bool(getattr(
+                        hit, "subsidiary_products_reference_verified", False)),
+                    allow_holding_product_role=bool(getattr(
+                        hit, "holding_product_role_reference_verified", False))),
+                hit.rank, hit.rcept_dt, hit.chunk_id),
         ))
     if authority_kind == "investment_plan":
         if prefer_latest:
@@ -2311,8 +2700,29 @@ def _exact_document_authority_hits(
                 doc_id=doc_id, projection="llm"))
         except (TypeError, ValueError):
             return ()
-    hits = tuple(
-        SimpleNamespace(
+    rows = tuple(rows)
+    referenced_product_ids = (
+        _referenced_subsidiary_product_chunk_ids(rows)
+        if authority_kind == "business_axis" else frozenset())
+    holding_role_ids = (
+        _referenced_holding_product_role_chunk_ids(rows)
+        if authority_kind == "business_axis" else frozenset())
+    hits = []
+    for index, row in enumerate(rows, start=1):
+        allow_subsidiary_products = row.chunk_id in referenced_product_ids
+        allow_holding_product_role = row.chunk_id in holding_role_ids
+        if row.rcept_dt > task.as_of:
+            continue
+        if authority_kind == "business_axis":
+            authorized = _business_axis_score(
+                task, row,
+                allow_subsidiary_products=allow_subsidiary_products,
+                allow_holding_product_role=allow_holding_product_role) > 0
+        else:
+            authorized = _authority_hit_matches(task, row, authority_kind)
+        if not authorized:
+            continue
+        hits.append(SimpleNamespace(
             rank=index, chunk_id=row.chunk_id, section_id=row.section_id,
             doc_id=row.doc_id, source_file_id=row.source_file_id,
             corp_code=getattr(row, "corp_code", corp_code),
@@ -2321,11 +2731,10 @@ def _exact_document_authority_hits(
             rcept_dt=row.rcept_dt, path=row.path, locator=row.locator,
             text_prompt_safe=row.text_prompt_safe,
             evidence_id=getattr(row, "evidence_id", None),
-        )
-        for index, row in enumerate(rows, start=1)
-        if row.rcept_dt <= task.as_of
-        and _authority_hit_matches(task, row, authority_kind)
-    )
+            subsidiary_products_reference_verified=allow_subsidiary_products,
+            holding_product_role_reference_verified=allow_holding_product_role,
+        ))
+    hits = tuple(hits)
     hits = _prioritize_authority_hits(task, hits, authority_kind)
     if authority_kind == "slot_table" and len(hits) != 1:
         return ()
@@ -2471,7 +2880,39 @@ def _authority_roundtripped_text(
             issuer_names = (corp_name,)
         return _investment_table_rows_for_issuer(table, issuer_names)
     if authority_kind == "business_axis":
-        if _business_axis_score(task, hit) <= 0 or _business_axis_score(task, section) <= 0:
+        follows_verified_holding_role = bool(getattr(
+            hit, "holding_product_role_reference_verified", False))
+        follows_verified_subsidiary_reference = bool(getattr(
+            hit, "subsidiary_products_reference_verified", False))
+        if _business_axis_score(
+                task, hit,
+                allow_subsidiary_products=follows_verified_subsidiary_reference,
+                allow_holding_product_role=follows_verified_holding_role) <= 0:
+            return None
+        if follows_verified_holding_role:
+            if (getattr(hit, "section_id", None)
+                    != getattr(section, "section_id", None)
+                    or "주요제품" not in _compact_heading(
+                        getattr(section, "path", ""))):
+                return None
+            roundtripped_chunk = _referenced_holding_product_role_excerpt(
+                roundtripped_chunk)
+            if roundtripped_chunk is None:
+                return None
+        elif follows_verified_subsidiary_reference:
+            if (getattr(hit, "section_id", None)
+                    != getattr(section, "section_id", None)
+                    or "기타참고사항" not in _compact_heading(
+                        getattr(section, "path", ""))
+                    or not _has_explicit_subsidiary_product_detail(
+                        roundtripped_chunk)):
+                return None
+            if _business_axis_kind(task.retrieval_query) in {"business", "products"}:
+                roundtripped_chunk = _referenced_subsidiary_product_excerpt(
+                    roundtripped_chunk)
+                if roundtripped_chunk is None:
+                    return None
+        elif _business_axis_score(task, section) <= 0:
             return None
         return _issuer_owned_business_text(task, roundtripped_chunk)
     if authority_kind == "investment_plan":
@@ -3005,6 +3446,43 @@ def _form_of(rm, doc_id: str, form: str) -> bool:
     if meta is None:
         return True
     return form in ((getattr(meta, "report_nm", "") or "") + (getattr(meta, "form", "") or ""))
+
+
+def _matches_matrix_period(rm, doc_id: str, period) -> bool:
+    """Require a matrix filing to cover its typed, standard fiscal period.
+
+    Search's 15-month filing window is a discovery bound, not proof that a
+    hit reports the requested fiscal year.  For non-standard date ranges we
+    leave the existing selector behavior unchanged; standard annual, half-
+    year and cumulative quarter endpoints must match document metadata.
+    """
+
+    start, end = getattr(period, "start", None), getattr(period, "end", None)
+    if start is None or end is None or start.year != end.year:
+        return True
+    expected = {
+        ((1, 1), (3, 31)): (3, "quarter"),
+        ((1, 1), (6, 30)): (6, "half"),
+        ((1, 1), (9, 30)): (9, "quarter"),
+        ((1, 1), (12, 31)): (12, "annual"),
+    }.get(((start.month, start.day), (end.month, end.day)))
+    if expected is None:
+        return True
+    rm._load_docs()
+    meta = rm._documents.get(doc_id)
+    if meta is None or getattr(meta, "doc_group", None) != "periodic":
+        return False
+    month, form = expected
+    if (getattr(meta, "base_year", None) != end.year
+            or getattr(meta, "base_month", None) != month):
+        return False
+    actual_form = str(getattr(meta, "form", "") or "")
+    names = {
+        "annual": ("annual", "사업보고서"),
+        "half": ("half", "반기보고서"),
+        "quarter": ("quarter", "분기보고서"),
+    }
+    return any(name in actual_form for name in names[form])
 
 
 def _plus_months(yyyymmdd: str, months: int) -> str:

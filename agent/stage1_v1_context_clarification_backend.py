@@ -36,6 +36,56 @@ def _empty_scope(item: Any) -> bool:
     return _empty_coordinates(item) and not item.target.entity_refs
 
 
+def _empty_coordinates_or_explicit_current(item: Any, *, question: str) -> bool:
+    """Allow Stage1 to retain the question's literal ``지금/현재`` axis."""
+
+    as_of = "".join(str(item.scope.as_of_expression or "").split()).casefold()
+    return (
+        (item.scope.as_of_expression is None
+         or (as_of in {"지금", "현재"} and as_of in question))
+        and item.scope.document_group_expression is None
+        and not item.scope.target_period_expressions
+        and not item.scope.scope_qualifier_expressions
+        and item.selection is None
+        and not item.target.qualifier_surfaces
+    )
+
+
+def _empty_or_explicit_current_scope(item: Any, *, question: str) -> bool:
+    return (_empty_coordinates_or_explicit_current(item, question=question)
+            and not item.target.entity_refs)
+
+
+def _explicit_current_contract_amount(item: Any, question: str) -> bool:
+    """A single stated contract amount at the available corpus cutoff.
+
+    The question's ``지금/현재`` supplies the time axis, but the user must
+    confirm the actual corpus date before the selected event is read.
+    """
+
+    target = "".join(item.target.surface.split()).casefold()
+    field = "".join(item.output.field_surfaces[0].split()).casefold() \
+        if len(item.output.field_surfaces) == 1 else ""
+    has_explicit_current_time = any(
+        marker in question for marker in ("지금", "현재"))
+    field_is_current_time = (
+        field in {"지금", "현재"} and has_explicit_current_time)
+    return (
+        item.target.kind == "metric"
+        and item.operation == "retrieve"
+        and item.output.shape == "scalar"
+        and item.output.projection_mode == "named_fields"
+        and _empty_or_explicit_current_scope(item, question=question)
+        and "계약금액" in target
+        and "해지금액" not in target
+        and not any(word in target for word in ("변동", "차이", "증감"))
+        and (field in {"계약금액", "금액", "얼마"}
+             or field_is_current_time)
+        and has_explicit_current_time
+        and not any(word in question for word in ("변동", "차이", "증감"))
+    )
+
+
 #: 개념 표시 표기는 ``agent.planning`` 이 정본 계정 사전으로 검증한 하나의 표를
 #: 쓴다. 여기 네 개만 두었을 때는 나머지 개념이 식별자로 노출됐다.
 def _metric_label(concept: str) -> str:
@@ -233,7 +283,7 @@ class MissingContextClarificationBackend:
             and any(token in normalized for token in ("변동", "차이", "증감"))
         )
         if is_contract_amount_change:
-            return _authority(item_id=item.item_id, slots=[
+            slots = [
                 {
                     "role_hint": "entity",
                     "prompt": "어느 회사인지 알려주세요.",
@@ -248,11 +298,13 @@ class MissingContextClarificationBackend:
                         "변동을 비교할 두 시점을 알려주세요. "
                         "(예: 2024-12-31, 2025-12-31)"),
                 },
-                {
+            ]
+            if "계약금액" not in normalized or "해지금액" in normalized:
+                slots.append({
                     "role_hint": "value_kind",
                     "prompt": "계약금액과 해지금액 중 무엇을 비교할까요?",
-                },
-            ])
+                })
+            return _authority(item_id=item.item_id, slots=slots)
         # 대상이 **개체 자체**이고 좌표가 하나도 없으면 무엇을 물었는지 정해지지
         # 않는다.  「회사 상태」는 재무일 수도, 공시일 수도, 계약일 수도 있다.
         #
@@ -301,13 +353,34 @@ class MissingContextClarificationBackend:
             if item.output.shape != "scalar":
                 return None
             is_contract_amount = (
-                _empty_coordinates(item)
+                _empty_coordinates_or_explicit_current(item, question=question)
                 and "계약" in normalized
                 and "금액" in normalized
             )
             if is_contract_amount:
                 company_missing = not item.target.entity_refs
                 if company_missing:
+                    if (self.corpus_cutoff is not None
+                            and _explicit_current_contract_amount(item, question)):
+                        cutoff = self.corpus_cutoff
+                        shown_date = f"{cutoff[:4]}-{cutoff[4:6]}-{cutoff[6:]}"
+                        return _authority(item_id=item.item_id, slots=[
+                            {
+                                "role_hint": "entity",
+                                "prompt": "어느 회사인지 알려주세요.",
+                            },
+                            {
+                                "role_hint": "event",
+                                "prompt": "어느 계약인지 접수번호 또는 계약명을 알려주세요.",
+                            },
+                            {
+                                "role_hint": "timepoint",
+                                "prompt": (
+                                    f"보유 자료는 {shown_date}까지입니다. "
+                                    "이 날짜의 계약금액을 확인하려면 "
+                                    f"{shown_date}를 입력해주세요."),
+                            },
+                        ])
                     return _authority(item_id=item.item_id, slots=[
                         {
                             "role_hint": "entity",

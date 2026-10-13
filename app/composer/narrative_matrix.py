@@ -316,7 +316,16 @@ def _public_narrative_surface(text: str) -> str:
     # 두 줄 머리글이 눌리며 같은 해가 두 번 남는다(``2025년 (2025년)``).
     # 뜻이 같은 되풀이라 하나만 둔다 (#261 A-4).
     value = re.sub(r"(20\d\d년)\s*\(\s*\1\s*\)", r"\1", value)
-    return value
+    source_lines = value.splitlines()
+    lines: list[str] = []
+    for index, line in enumerate(source_lines):
+        if (lines and lines[-1].lstrip().startswith("|")
+                and line.lstrip().startswith("|")
+                and index + 1 < len(source_lines)
+                and _is_table_rule(_table_cells(source_lines[index + 1]))):
+            lines.append("")
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _markdown_cell(value: str) -> str:
@@ -468,6 +477,7 @@ def _investment_rows(
 
     lines = _source_body(text).splitlines()
     found: list[tuple[str, str, str, str, str, str | None]] = []
+    incomplete_rows = False
     index = 0
     while index < len(lines):
         if not lines[index].lstrip().startswith("|"):
@@ -501,7 +511,12 @@ def _investment_rows(
             if len(row) <= needed or _is_table_rule(row):
                 continue
             values = tuple(row[positions[role]] for role in ("투자대상", "목적", "금액", "기간"))
-            if any(not value for value in values):
+            if any(not value.strip() for value in values):
+                # Do not let one complete row make the compact projection
+                # look like the whole source table when another disclosed
+                # row has an unreported target, purpose, amount, or period.
+                # The caller will fall back to the full category-table view.
+                incomplete_rows = True
                 continue
             spent = row[spent_position] if spent_position is not None else None
             if spent is not None and not spent.strip():
@@ -509,7 +524,7 @@ def _investment_rows(
             typed = (*values, unit, spent)
             if typed not in found:
                 found.append(typed)
-    return tuple(found)
+    return () if incomplete_rows else tuple(found)
 
 
 def _bounded_table_summary(prefix: str, rows: list[str], *, limit: int) -> str:
@@ -648,9 +663,16 @@ def _investment_plan_table(
         if len(block) < 3:
             continue
         header = _table_cells(block[0])
-        if (not header or not _is_table_rule(_table_cells(block[1]))
-                or not any("투자계획" in _compact_key(value)
-                           for value in header)):
+        if not header or not _is_table_rule(_table_cells(block[1])):
+            continue
+        compact_header = tuple(_compact_key(value) for value in header)
+        explicit_plan_header = any("투자계획" in value for value in compact_header)
+        context = _compact_key("\n".join(lines[max(0, start - 10):start]))
+        complete_project_roles = (
+            len(_investment_header_positions(header))
+            == len(_INVESTMENT_SLOT_HEADERS))
+        if not (explicit_plan_header or
+                (complete_project_roles and "투자" in context and "계획" in context)):
             continue
         rows = tuple(
             tuple(row)
@@ -718,7 +740,7 @@ def _investment_plan_summary(
     label_index = next((
         index for index, value in enumerate(compact)
         if value in {"구분", "투자항목", "투자유형", "투자분류"}
-    ), 0)
+    ), _investment_header_positions(header).get("투자대상", 0))
     labels = tuple(row[label_index] for row in rows if len(row) > label_index)
     has_execution = any(
         any(marker in value for marker in ("실적", "기지출", "집행", "기투자"))
@@ -1186,6 +1208,74 @@ def _product_table_digest(
     return None
 
 
+def _named_company_product_digest(text: str | None, *, limit: int) -> str:
+    """Keep source-named company profiles distinct in a product summary."""
+
+    body = _source_body(text)
+    profiles = tuple(re.finditer(
+        r"(?m)^[ \t]*(?P<company>[^|\n]{2,100})\n"
+        r"(?:[ \t]*\n)*[ \t]*1[.)]\s*사업의\s*개요\b", body))
+    candidates: list[tuple[str, str, tuple[str, ...]]] = []
+    seen_companies: set[str] = set()
+    for index, profile in enumerate(profiles):
+        company = " ".join(profile.group("company").split())
+        if (not any(marker in company for marker in (
+                "(주)", "㈜", "주식회사", "Inc.", "Inc", "Co.", "Ltd.",
+                "LLC", "LCC")) or company in seen_companies):
+            continue
+        end = profiles[index + 1].start() if index + 1 < len(profiles) else len(body)
+        source = body[profile.end():end]
+        product = re.search(
+            r"(?<!\S)2[.)]\s*주요\s*제품\s*(?:및|과)\s*서비스\b", source)
+        if product is None:
+            continue
+        source = source[product.end():]
+        boundary = re.search(r"(?<!\S)[3-7][.)]\s*(?:원재료|매출|위험|주요계약|연구개발|기타)", source)
+        if boundary is not None:
+            source = source[:boundary.start()]
+        table = _product_table_digest(
+            source, limit=len(source) + 100, business_only=True)
+        if table:
+            terms: list[str] = []
+            for term in _business_concepts(table, strict_material=True):
+                if any(_compact_key(term) in _compact_key(previous)
+                       for previous in terms):
+                    continue
+                terms.append(term)
+            summary = "·".join(terms)
+        else:
+            terms = []
+            subheading = re.search(r"(?m)^[ \t]*[가-하][.)]\s+\S", source)
+            if subheading is not None and source[:subheading.start()].strip():
+                source = source[:subheading.start()]
+            summary = _business_sentence_digest(
+                source, limit=max(80, limit // max(1, len(profiles))),
+                topic="주요 제품 및 서비스")
+            summary = _replace_filer_first_person(summary, company)
+        if summary:
+            candidates.append((company, summary, tuple(terms)))
+            seen_companies.add(company)
+    if not candidates:
+        return ""
+    # Reserve a line for each proved company rather than letting the first
+    # long product description erase all later profiles. Never cut a term or
+    # sentence midway to satisfy this soft display budget.
+    rows: list[list[str]] = []
+    per_company = max(40, limit // len(candidates))
+    for company, summary, terms in candidates:
+        if terms:
+            kept: list[str] = []
+            for term in terms:
+                if kept and len(company) + len("·".join((*kept, term))) > per_company:
+                    break
+                kept.append(term)
+            summary = "·".join(kept) + (" 등" if len(kept) < len(terms) else "")
+        rows.append([company, summary])
+    return _bounded_table_block(
+        "회사별 주요 제품·서비스", ["원문 회사명", "주요 제품·서비스"],
+        rows, limit=limit)
+
+
 _BUSINESS_TOPIC_STOPWORDS = {
     "관련", "주요", "사업", "사업내용", "사업부문", "영업", "부문", "제품",
     "서비스", "비교", "차이", "변화", "현황", "구조", "구성", "설명", "기준",
@@ -1342,6 +1432,11 @@ def _business_table_axis_digest(text: str | None, *, limit: int) -> str:
                 continue
             if column == "사업" or any(marker in column for marker in ("사업부문", "영업부문", "사업영역")):
                 score = 120
+                if any("계정과목" in _compact_key(cell) for cell in header):
+                    # A segment-by-account table explicitly declares operating
+                    # divisions; a nearby sales-type table may describe only
+                    # the parent's own revenue instead.
+                    score += 40
             elif column == "구분":
                 score = 80
             elif any(marker in column for marker in (
@@ -2217,6 +2312,66 @@ def _is_business_cross_reference(text: str) -> bool:
         r"(?:참고사항|주석|사업의\s*내용).{0,240}참고하시기\s*바랍니다", text))
 
 
+def _authority_bound_metric_table_digest(
+        text: str | None, topic: str, source_path: str, *, limit: int) -> str:
+    """Display a numeric table proved by an exact disclosure subsection.
+
+    Topic words need not repeat in every issuance/outstanding-balance row.
+    A chapter-wide hint is insufficient: require the source-owned numbered
+    subsection and an adjacent declared unit before projecting any values.
+    """
+
+    from agent.disclosed_metric_topics import disclosed_metrics_for_query
+
+    entries = disclosed_metrics_for_query(topic)
+    if not any(
+            ">" in entry.section_hint
+            and _compact_key(entry.section_hint) in _compact_key(source_path)
+            for entry in entries):
+        return ""
+    lines = _source_body(text).splitlines()
+    for start in range(max(0, len(lines) - 1)):
+        if not lines[start].lstrip().startswith("|"):
+            continue
+        header = _table_cells(lines[start])
+        if (len(header) < 2
+                or not _is_table_rule(_table_cells(lines[start + 1]))):
+            continue
+        end = start + 2
+        rows: list[list[str]] = []
+        while end < len(lines) and lines[end].lstrip().startswith("|"):
+            if (end + 1 < len(lines)
+                    and _is_table_rule(_table_cells(lines[end + 1]))):
+                break
+            row = _table_cells(lines[end])
+            if len(row) == len(header) and not _is_table_rule(row):
+                rows.append(row)
+            end += 1
+        if not rows or not any(_NUM.search(value) for row in rows for value in row):
+            continue
+        before = start - 1
+        blank_gap = 0
+        while before >= 0 and not lines[before].strip() and blank_gap < 2:
+            before -= 1
+            blank_gap += 1
+        if before >= 1 and _is_table_rule(_table_cells(lines[before])):
+            before -= 1
+        if before < 0:
+            continue
+        carrier = lines[before].strip()
+        if carrier.startswith("|"):
+            carrier = " ".join(_table_cells(carrier))
+        declaration = re.search(r"단위\s*[:：]\s*([^)|\n]{1,60})", carrier)
+        if declaration is None:
+            continue
+        unit = declaration.group(1).strip()
+        return _bounded_table_block(
+            f"{_public_column_name(header[0])} 기준 공시 표(단위: {unit})",
+            [_public_column_name(value) for value in header],
+            rows, limit=limit)
+    return ""
+
+
 def _subsidiary_roster_digest(text: str | None, topic: str) -> str:
     """Keep an explicitly disclosed ownership roster on its requested axis."""
     if "자회사" not in _compact_key(topic):
@@ -2268,6 +2423,10 @@ def _compact_cell_text(
         if metrics:
             return metrics
     if any(marker in _compact_key(topic) for marker in ("제품", "서비스")):
+        if not temporal_business_change:
+            company_products = _named_company_product_digest(text, limit=limit)
+            if company_products:
+                return company_products
         products = _product_table_digest(text, limit=limit, business_only=business_only)
         if products:
             return products
@@ -2379,12 +2538,14 @@ def _compact_cell_text(
 
 
 def _matrix_excerpt(text: str | None, *, limit: int = 1600) -> str:
-    """Keep a source table structurally parseable inside the private matrix."""
+    """Keep bounded source paragraphs and tables parseable in the matrix."""
 
     body = _source_body(text)
-    if any(line.lstrip().startswith("|") for line in body.splitlines()):
+    if (len(body) <= limit
+            or any(line.lstrip().startswith("|") for line in body.splitlines())):
         # A table header/row boundary is semantic evidence.  Do not flatten it
-        # into spaces before the deterministic plan-row projection runs.
+        # into spaces before projection. Short numbered company profiles need
+        # their paragraph boundaries for the same reason, even without tables.
         return body
     return _clean(body, limit=limit)
 
@@ -2732,6 +2893,7 @@ def _comparison_terms(text: str, *, limit: int = 64) -> tuple[str, ...]:
 
 def _business_concepts(
         text: str, *, limit: int = 24, strict_material: bool = False,
+        products_only: bool = False,
         ) -> tuple[str, ...]:
     """Extract source-literal product/business concepts, not arbitrary words.
 
@@ -2773,6 +2935,16 @@ def _business_concepts(
         value = re.sub(
             r"^(?:당사|연결실체|연결회사|회사[A-Za-z가-힣0-9]*)(?:는|가)?\s*", "", value)
         value = re.sub(r"\s*(?:등(?:의)?|관련)$", "", value)
+        # Counted prose labels ("세 가지 주요 영역으로 사업") describe
+        # how an issuer groups its business, not a business/product concept.
+        # A clipped object matcher can drop the number and leave exactly this
+        # fragment, so reject both the complete label and that clipped form.
+        if re.search(
+                r"(?:^|\s)(?:(?:\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*)?"
+                r"(?:가지|개)\s*(?:주요\s*)?(?:사업\s*)?"
+                r"(?:영역|분야|축)(?:으로|에서)?(?:\s*사업)?$",
+                value):
+            return
         if strict_material and from_prose:
             # A short-object regex may capture the viewer's glued section
             # subject together with the actual product object.  Retain only
@@ -2807,6 +2979,7 @@ def _business_concepts(
                     "조정 및 제거", "조정및제거",
                     "있으며",
                 }
+                or value.casefold() in _COMPARISON_TERM_STOPWORDS
                 or re.search(r"(?:합니다|있습니다|하였습니다)$", value)):
             return
         if from_prose and re.search(r"부문(?:에서|은|는|이|가)\s", value):
@@ -2867,7 +3040,14 @@ def _business_concepts(
                 and not any(marker in name for marker in (
                     "개요", "설명", "내용", "매출", "비율", "금액")))
         ]
-        if not positions:
+        if products_only:
+            positions = [
+                offset for offset, name in enumerate(compact_header)
+                if (any(marker in name for marker in ("품목", "제품", "서비스", "상품"))
+                    and not any(marker in name for marker in (
+                        "개요", "설명", "내용", "매출", "비율", "금액")))
+            ]
+        elif not positions:
             positions = [
                 offset for offset, name in enumerate(compact_header)
                 if (any(marker in name for marker in (
@@ -2898,6 +3078,25 @@ def _business_concepts(
 
     prose = " ".join(line.strip() for line in lines
                      if line.strip() and not line.lstrip().startswith("|"))
+    # When a source gives a counted list of operating areas, keep the literal
+    # members before the count phrase (e.g. "music, platform, technology") as
+    # concepts.  This is a source-structure pattern, not a company-specific
+    # vocabulary or synonym map.
+    for match in re.finditer(
+            r"(?P<items>[^.!?。]{2,220}?)\s*"
+            r"(?:\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*"
+            r"(?:가지|개)\s*(?:주요\s*)?(?:사업\s*)?(?:영역|분야|축)",
+            prose):
+        items = re.split(r"[.!?。]", match.group("items"))[-1]
+        tail = re.split(r"[.!?。]", prose[match.end():], maxsplit=1)[0][:100]
+        if (not re.search(r"[,/·]|(?:과|와)\s+|\s+및\s+", items)
+                or not re.search(
+                    r"생산|제조|판매|공급|제공|영위|운영|건설|시공|수주|개발|수행",
+                    tail)):
+            continue
+        for value in re.split(
+                r"\s*[,/·]\s*|\s+(?:및|와|과)\s+", items):
+            add(value, from_prose=True)
     # Enumerations immediately feeding a disclosed operating activity.
     for match in re.finditer(
             r"(?P<objects>[^.!?]{2,180}?)(?:을|를)?\s*"
@@ -3593,7 +3792,8 @@ def _propagate_cross_topic_restatement_basis(
 def _metric_deltas(
         cells: tuple["MatrixCellEvidence", ...],
         ) -> tuple[tuple[_ComparableMetric, _ComparableMetric, Decimal], ...]:
-    if len(cells) < 2 or _has_reclassified_comparatives(cells):
+    if (len(cells) < 2 or _has_reclassified_comparatives(cells)
+            or not _aligned_period_reports(cells)):
         return ()
     rows = [_direct_metrics(cell.excerpt) for cell in cells]
     maps = [{metric.key: metric for metric in row} for row in rows]
@@ -3834,6 +4034,42 @@ def _cell_report_year(cell: "MatrixCellEvidence") -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _aligned_period_reports(cells: tuple["MatrixCellEvidence", ...]) -> bool:
+    """Check the cited filing form and target period before endpoint deltas.
+
+    Older synthetic/legacy cells have no report metadata, so their existing
+    exact-table rules remain in force.  Once any cell has an actual report
+    name, however, every endpoint needs one unambiguous filing identity.
+    """
+
+    if not any(cell.report_names for cell in cells):
+        return True
+    bases: set[tuple[str, int]] = set()
+    for cell in cells:
+        if len(cell.report_names) != 1:
+            return False
+        name = cell.report_names[0]
+        form = ("half" if "반기보고서" in name else
+                "quarter" if "분기보고서" in name else
+                "annual" if "사업보고서" in name else "")
+        reported = re.search(r"\(\s*(20\d{2})[.\-/](\d{1,2})\s*\)", name)
+        if not form or reported is None:
+            return False
+        year, month = int(reported.group(1)), int(reported.group(2))
+        label = cell.label.partition(" · ")[2]
+        range_end = re.search(r"~(20\d{2})-(\d{2})-(\d{2})$", label)
+        if range_end:
+            if (year, month) != (int(range_end.group(1)), int(range_end.group(2))):
+                return False
+        elif re.fullmatch(r"20\d{2}년", label):
+            if year != _cell_report_year(cell) or (form, month) != ("annual", 12):
+                return False
+        else:
+            return False
+        bases.add((form, month))
+    return len(bases) == 1
+
+
 def _structured_row_key(label: str) -> str:
     """Normalize only structural aggregate aliases inside a composite row."""
 
@@ -3954,7 +4190,7 @@ def _structured_cross_cell_deltas(
         ) -> tuple[_StructuredPeriodDelta, ...]:
     """Match identical composite row coordinates across requested reports."""
 
-    if len(cells) < 2:
+    if len(cells) < 2 or not _aligned_period_reports(cells):
         return ()
     if _has_reclassified_comparatives(cells):
         # A latest report can reclassify historical segment values even when
@@ -4056,7 +4292,7 @@ def _structured_explicit_year_fallback(
     inventing a cross-document join.
     """
 
-    if len(cells) < 2:
+    if len(cells) < 2 or not _aligned_period_reports(cells):
         return ()
     before_year = _cell_report_year(cells[0])
     after_year = _cell_report_year(cells[-1])
@@ -4500,6 +4736,7 @@ class MatrixCellEvidence:
     excerpt: str
     receipts: tuple[str, ...]
     restated_comparatives: bool = False
+    report_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4559,9 +4796,10 @@ class NarrativeMatrix:
                 planned_coordinates.add(_coordinate_signature(coordinate))
                 if coordinate.cell_id not in completed:
                     continue
-                output_ids = tuple(sorted(ids_by_cell.get(coordinate.cell_id, ())))
-                if not output_ids:
+                output_ids = tuple(ids_by_cell.get(coordinate.cell_id, ()))
+                if not output_ids or len(set(output_ids)) != len(output_ids):
                     return None
+                binding = tuple(sorted(output_ids))
                 signature = _coordinate_signature(coordinate)
                 # A claim must never be attributed to two company/period/topic
                 # coordinates.  This is fail-closed instead of guessing which
@@ -4572,12 +4810,16 @@ class NarrativeMatrix:
                         return None
                 previous_binding = bindings_by_coordinate.get(signature)
                 if previous_binding is not None:
-                    if previous_binding != output_ids:
+                    if previous_binding != binding:
                         return None
                     continue  # exact duplicate coordinate; retain one cell
                 linked = [claims_by_id[output_id] for output_id in output_ids
                           if output_id in claims_by_id]
                 receipts = _receipt_numbers(linked)
+                report_names = tuple(dict.fromkeys(
+                    citation.report_name for claim in linked
+                    for citation in claim.citations
+                    if citation.report_name and citation.rcept_no in receipts))
                 # A per-cell sentence without its own receipt is not allowed.
                 if len(linked) != len(output_ids) or not receipts:
                     return None
@@ -4596,7 +4838,7 @@ class NarrativeMatrix:
                 # previously erased product rows and reconciliation rows from
                 # an otherwise verified narrative matrix.
                 excerpts = _dedupe_same_source_excerpts(linked)
-                excerpt = " / ".join(part for part in excerpts if part)
+                excerpt = "\n\n".join(part for part in excerpts if part)
                 if not excerpt:
                     return None
                 if not _narrative_excerpt_is_adequate(
@@ -4607,8 +4849,9 @@ class NarrativeMatrix:
                 label = f"{coordinate.corp_name} · {public_period}"
                 cells.append(MatrixCellEvidence(
                     cell_id=coordinate_id, label=label, topic=coordinate.topic,
-                    excerpt=excerpt, receipts=receipts))
-                bindings_by_coordinate[signature] = output_ids
+                    excerpt=excerpt, receipts=receipts,
+                    report_names=report_names))
+                bindings_by_coordinate[signature] = binding
                 corp_names.add(coordinate.corp_name)
                 periods.add(public_period)
         # A single narrative task/cell remains on the legacy long-form path.
@@ -4625,15 +4868,18 @@ class NarrativeMatrix:
             if previous is None:
                 deduped[key] = MatrixCellEvidence(
                     cell.cell_id, cell.label, _topic_display(cell.topic),
-                    cell.excerpt, cell.receipts)
+                    cell.excerpt, cell.receipts,
+                    report_names=cell.report_names)
                 continue
             old = re.sub(r"\s+", " ", previous.excerpt).strip()
             new = re.sub(r"\s+", " ", cell.excerpt).strip()
             excerpt = (previous.excerpt if new in old else cell.excerpt
-                       if old in new else f"{previous.excerpt} / {cell.excerpt}")
+                       if old in new else f"{previous.excerpt}\n\n{cell.excerpt}")
             deduped[key] = MatrixCellEvidence(
                 previous.cell_id, previous.label, previous.topic, excerpt,
-                tuple(dict.fromkeys((*previous.receipts, *cell.receipts))))
+                tuple(dict.fromkeys((*previous.receipts, *cell.receipts))),
+                report_names=tuple(dict.fromkeys(
+                    (*previous.report_names, *cell.report_names))))
         cells = list(deduped.values())
         if len(corp_names) > 1:
             kind = "회사별 비교"
@@ -5350,8 +5596,29 @@ class NarrativeMatrix:
                 for cell in self.cells:
                     if _topic_display(cell.topic) != topic:
                         continue
-                    for term in _business_concepts(cell.excerpt, limit=4):
-                        if term not in terms:
+                    rendered = _compact_cell_text(
+                        cell.excerpt, topic=cell.topic,
+                        limit=_narrative_cell_display_limit(
+                            cell.topic, temporal=False, compact_comparison=False))
+                    visible_key = _compact_key(rendered).casefold()
+                    named_segments = tuple(dict.fromkeys(re.findall(
+                        r"[가-힣A-Za-z0-9&/-]{2,30}부문", rendered)))
+                    named_segments = tuple(
+                        value for value in named_segments
+                        if value not in {"사업부문", "영업부문"})
+                    products_only = _topic_axis(cell.topic) == "products_services"
+                    candidates = (
+                        *(named_segments if _is_main_business_topic(cell.topic)
+                          and len(named_segments) >= 2 else ()),
+                        *_business_concepts(rendered, products_only=products_only),
+                        *_business_concepts(cell.excerpt, products_only=products_only),
+                    )
+                    for term in candidates:
+                        key = _compact_key(term).casefold()
+                        if (key in visible_key
+                                and not re.search(r"(?:은|는|이|가)\s", term)
+                                and not any(key in _compact_key(previous).casefold()
+                                            for previous in terms)):
                             terms.append(term)
                 if terms:
                     joined = "·".join(terms[:4])
@@ -5383,6 +5650,13 @@ class NarrativeMatrix:
                 typed_cells = tuple(sorted(
                     cells, key=lambda cell: cell.label.partition(" · ")[2]))
                 display_topic = _topic_display(typed_cells[0].topic)
+                if not _aligned_period_reports(typed_cells):
+                    period_statements.append((
+                        company, display_topic,
+                        "인용된 보고서의 종류나 대상 기간이 요청한 기간과 달라 "
+                        "서로 다른 기간의 수치를 빼지 않았습니다. "
+                        "각 값과 접수번호는 아래 기간별 근거에서 확인할 수 있습니다"))
+                    continue
                 main_business_change = _is_main_business_topic(display_topic)
                 # An identical finding is stronger than a display-level
                 # similarity.  Require the complete retained source excerpts
@@ -6747,6 +7021,10 @@ class NarrativeDigest:
             plan_table = _investment_plan_table(claim.text)
             if plan_table:
                 header, plan_rows, unit = plan_table
+                display_rows = tuple(
+                    tuple(value if value.strip() else "원문에 기재되지 않음"
+                          for value in row)
+                    for row in plan_rows)
                 rows.extend((
                     _investment_plan_summary(header, plan_rows, citation=citation),
                     _public_table_caption(public_label, header)
@@ -6759,8 +7037,16 @@ class NarrativeDigest:
                         for value in (*header, "근거")) + "|",
                     *("| " + " | ".join(
                         _markdown_cell(value) for value in (*row, citation)) + " |"
-                      for row in plan_rows),
+                      for row in display_rows),
                 ))
+                if any(not value.strip() for row in plan_rows for value in row):
+                    rows.append(
+                        "비어 있는 셀은 원문에 기재되지 않은 항목으로 표시했습니다.")
+                if any(value.strip() in {"-", "–", "—", "―"}
+                       for row in plan_rows for value in row):
+                    rows.append(
+                        "표의 대시 표시는 원문 그대로이며, 0원이나 미집행으로 "
+                        "해석하지 않았습니다.")
                 continue
             plan = _investment_plan_digest(claim.text, limit=1100)
             if plan:
@@ -6801,10 +7087,20 @@ class NarrativeDigest:
             # matrix cell.  This preserves all major source rows (rather than
             # only the first two) while remaining below the existing typed
             # digest boundary used for investment tables.
-            summary = (_compact_cell_text(claim.text, topic=topic, limit=1100)
-                       if topic else _compact_narrative_text(
-                           claim.text, label=public_label))
+            summary = _authority_bound_metric_table_digest(
+                claim.text, topic, claim.label, limit=1100)
+            if not summary:
+                summary = (_compact_cell_text(claim.text, topic=topic, limit=1100)
+                           if topic else _compact_narrative_text(
+                               claim.text, label=public_label))
             if summary:
+                heading = re.fullmatch(
+                    r"\s*(?:[가-하]|\d+(?:-\d+)?)[.)]\s*(?P<body>[^.!?\n]{1,100})",
+                    summary)
+                if (heading is not None
+                        and not _NUM.search(heading.group("body"))
+                        and not re.search(r"(?:습니다|니다|없음|있음|함|임)$", summary)):
+                    continue
                 narratives.append(
                     f"- {public_label}: {_public_narrative_surface(summary)} "
                     f"(근거: {citation})")
