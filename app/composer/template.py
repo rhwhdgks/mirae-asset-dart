@@ -2239,7 +2239,9 @@ def _narrative_correction_summary(claims) -> str | None:
             # 내용" bullet can replay prose the correction table above has
             # already compacted to its changed span.  Keep the bullet only
             # when it is the shorter reading; otherwise show the changed span.
-            if after_bullets and len(after_bullets) > len(compacted):
+            if (after_bullets
+                    and not _correction_after_side_is_blank(change_source)
+                    and len(after_bullets) > len(compacted)):
                 after_bullets = ""
             change = (after_bullets or compacted).strip().rstrip(". ")
             body = (
@@ -2309,7 +2311,11 @@ def _correction_after_bullets(change: str) -> str:
     before, after = change.split(" → ", 1)
     before_bullets = _advisory_bullets(before)
     after_bullets = _advisory_bullets(after)
-    if not before_bullets or not after_bullets:
+    if not before_bullets:
+        return ""
+    if not after_bullets:
+        if _is_blank_advisory_marker(after):
+            return "정정 후 기타 투자판단 사항은 원문에 내용 없이 「-」로 기재됐습니다"
         return ""
     before_keys = {re.sub(r"\s+", " ", value).strip()
                    for value in before_bullets}
@@ -2343,6 +2349,18 @@ def _correction_after_bullets(change: str) -> str:
 
 #: 원문이 값 자리에 내용 없이 적어 두는 표시. 값이 아니라 상태다.
 _IS_BLANK_ADVISORY = re.compile(r"[-–—ー・.\s]*")
+
+
+def _is_blank_advisory_marker(value: str) -> bool:
+    stripped = value.strip()
+    return bool(stripped) and _IS_BLANK_ADVISORY.fullmatch(stripped) is not None
+
+
+def _correction_after_side_is_blank(change: str) -> bool:
+    if change.count(" → ") != 1:
+        return False
+    _before, after = change.split(" → ", 1)
+    return _is_blank_advisory_marker(after)
 
 
 def _compact_correction_change(change: str, *, limit: int = 320) -> str:

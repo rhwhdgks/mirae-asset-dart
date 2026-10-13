@@ -1,6 +1,11 @@
 """Keep a correction's blank advisory marker distinct from disclosed text."""
 
-from app.composer.template import _correction_after_bullets
+from types import SimpleNamespace
+
+from app.composer.template import (
+    _correction_after_bullets,
+    _narrative_correction_summary,
+)
 
 
 def test_blank_after_advisory_is_explained_not_rendered_as_a_value():
@@ -15,3 +20,18 @@ def test_stated_after_advisory_remains_visible():
         "- 종전 계약 사항 → - 계약이 해지됐습니다")
 
     assert rendered == "정정 후 확인되는 내용: 계약이 해지됐습니다"
+
+
+def test_blank_after_marker_survives_full_narrative_rendering():
+    claim = SimpleNamespace(
+        operator="correction_diff",
+        label="기타 투자판단 사항",
+        text="- 종전 투자판단 사항 → -",
+        citations=[],
+    )
+
+    rendered = _narrative_correction_summary([claim])
+
+    assert rendered is not None
+    assert "원문에 내용 없이 「-」로 기재됐습니다" in rendered
+    assert "변경: -" not in rendered
