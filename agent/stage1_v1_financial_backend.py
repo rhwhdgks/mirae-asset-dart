@@ -828,10 +828,10 @@ class FinancialResolutionBackend:
                     operand_as_of=(
                         _period_bound_operand_as_of(
                             rows, companies=self.companies,
-                            corpus_cutoff=self.corpus_cutoff)
+                            corpus_cutoff=as_of)
                         or _instant_fiscal_year_end_operand_as_of(
                             rows, companies=self.companies,
-                            corpus_cutoff=self.corpus_cutoff,
+                            corpus_cutoff=as_of,
                             operand_views=operand_views)
                     ),
                     field_surfaces=tuple(item.output.field_surfaces),
@@ -1084,18 +1084,22 @@ def _period_bound_operand_as_of(
         rows: "tuple[FinancialCoordinate, ...]", *, companies: Any,
         corpus_cutoff: str,
         ) -> "tuple[str, ...] | None":
-    """Bind each same-company period operand to its own periodic filing.
+    """Preserve report-period binding only for point-in-time coordinates.
 
-    A later annual or interim report repeats earlier periods as comparison
-    columns.  A corpus-end ``restated`` lookup would therefore cite both
-    operands from the later document, even when the question asks for two
-    separately filed periods.  For a same-company period relation, cap each
-    operand at the latest filing whose *base period* equals that operand.
-    Corrections to that exact report remain visible, while a following
-    period's comparison column cannot replace its source document.
+    Income/cash-flow period comparisons use the resolved shared ``as_of``:
+    later reports can restate an earlier period and must remain visible to a
+    ``restated`` lookup. Each value keeps its own accounting period; that is
+    not a reason to replace its observation cutoff with its original filing
+    date. Explicit report identities are resolved by document backends.
+
+    Point-in-time amounts retain the separate requested-report-period policy.
+    ``corpus_cutoff`` here is bounded by the item's explicit as-of, if any.
     """
 
-    if (len(rows) != 2 or rows[0].corp_code != rows[1].corp_code
+    if (len(rows) != 2
+            or any(concept_axes(row.concept).period_semantics != "instant"
+                   for row in rows)
+            or rows[0].corp_code != rows[1].corp_code
             or rows[0].scope != rows[1].scope
             or rows[0].period_end == rows[1].period_end
             or not callable(getattr(companies, "documents", None))):
