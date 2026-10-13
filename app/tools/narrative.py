@@ -243,6 +243,17 @@ class InvestmentAggregationRequest:
 
 
 @dataclass(frozen=True)
+class InvestmentTableComponent:
+    """One individually identified row included in a verified investment sum."""
+
+    label: str
+    value: Decimal
+    unit: str
+    value_won: Decimal
+    source_excerpt: str
+
+
+@dataclass(frozen=True)
 class InvestmentTableAggregate:
     """Exact deterministic sum of one structurally proved amount column."""
 
@@ -250,6 +261,7 @@ class InvestmentTableAggregate:
     value: Decimal
     unit: str
     value_won: Decimal
+    components: tuple[InvestmentTableComponent, ...]
 
 
 _INVESTMENT_UNIT_SCALE = {
@@ -261,10 +273,10 @@ _INVESTMENT_UNIT_SCALE = {
 _INVESTMENT_TOTAL_MARKERS = frozenset({"소계", "합계", "총계"})
 
 
-def _adjacent_investment_table_unit(
+def _adjacent_investment_unit_declaration(
         lines: list[str], table_start: int,
-        ) -> str | None:
-    """Read a unit only from the structural block adjacent to the table."""
+        ) -> tuple[int, str] | None:
+    """Return the exact source line declaring a unit next to one table."""
 
     before = table_start - 1
     blank_gap = 0
@@ -285,8 +297,21 @@ def _adjacent_investment_table_unit(
     unit_label = re.search(r"단위\s*[:：]?", carrier)
     if unit_label is None:
         return None
-    matches = set(re.findall(
-        r"백만원|천원|억원|원", carrier[unit_label.end():]))
+    return before, carrier
+
+
+def _adjacent_investment_table_unit(
+        lines: list[str], table_start: int,
+        ) -> str | None:
+    """Read a unit only from the structural block adjacent to the table."""
+
+    declaration = _adjacent_investment_unit_declaration(lines, table_start)
+    if declaration is None:
+        return None
+    carrier = declaration[1]
+    unit_label = re.search(r"단위\s*[:：]?", carrier)
+    assert unit_label is not None
+    matches = set(re.findall(r"백만원|천원|억원|원", carrier[unit_label.end():]))
     return next(iter(matches)) if len(matches) == 1 else None
 
 
@@ -347,11 +372,14 @@ def _aggregate_investment_table(
         return None
 
     start, end, header, positions = tables[0]
+    unit_declaration = _adjacent_investment_unit_declaration(lines, start)
     table_unit = _adjacent_investment_table_unit(lines, start)
     amount_pos = positions["금액"]
     values_won: list[Decimal] = []
     display_values: list[tuple[Decimal, str]] = []
-    for line in lines[start + 2:end]:
+    components: list[InvestmentTableComponent] = []
+    for row_index in range(start + 2, end):
+        line = lines[row_index]
         cells = _table_cells(line)
         if len(cells) != len(header):
             return None
@@ -371,9 +399,26 @@ def _aggregate_investment_table(
         unit = numeric.group("unit") or table_unit
         if unit not in _INVESTMENT_UNIT_SCALE:
             return None
+        label = " ".join(cells[positions["투자대상"]].split())
+        if not label or label in {"-", "–", "—", "―", "."}:
+            return None
         value = Decimal(numeric.group("value").replace(",", ""))
-        values_won.append(value * _INVESTMENT_UNIT_SCALE[unit])
+        value_won = value * _INVESTMENT_UNIT_SCALE[unit]
+        values_won.append(value_won)
         display_values.append((value, unit))
+        excerpt_lines = []
+        if table_unit is not None and unit_declaration is not None:
+            unit_index = unit_declaration[0]
+            excerpt_lines.append(lines[unit_index])
+            if (unit_index + 1 < start
+                    and _is_table_rule(_table_cells(lines[unit_index + 1]))):
+                excerpt_lines.append(lines[unit_index + 1])
+        excerpt_lines.extend(lines[start:start + 2])
+        excerpt_lines.append(line)
+        components.append(InvestmentTableComponent(
+            label=label, value=value, unit=unit, value_won=value_won,
+            source_excerpt="\n".join(excerpt_lines),
+        ))
     if (not values_won
             or (request.expected_row_count is not None
                 and len(values_won) != request.expected_row_count)):
@@ -390,6 +435,7 @@ def _aggregate_investment_table(
     return InvestmentTableAggregate(
         row_count=len(values_won), value=display_value,
         unit=display_unit, value_won=sum(values_won, Decimal(0)),
+        components=tuple(components),
     )
 
 
@@ -399,6 +445,31 @@ def _format_investment_decimal(value: Decimal) -> str:
     grouped = f"{int(integer):,}"
     fraction = fraction.rstrip("0")
     return f"{grouped}.{fraction}" if dot and fraction else grouped
+
+
+def _investment_sum_component_claims(
+        *, task_id: str, corp_name: str, aggregate: InvestmentTableAggregate,
+        doc_id: str, receipt: str, section_id: str, locator: str,
+        ) -> tuple[AnswerClaim, ...]:
+    """Expose each verified sum operand with its own source-row excerpt."""
+
+    claims = []
+    for index, component in enumerate(aggregate.components, start=1):
+        claims.append(AnswerClaim(
+            output_id=f"{task_id}.investment-sum.component-{index}",
+            label=(f"{corp_name} 투자계획 구성항목 {index} · "
+                   f"{component.label}"),
+            value_text=_format_investment_decimal(component.value),
+            raw_unit=component.unit,
+            canonical_value=format(component.value_won, "f"),
+            canonical_unit="원",
+            citations=[ClaimCitation(
+                doc_id=doc_id, rcept_no=receipt, section_id=section_id,
+                locator=locator, excerpt_prompt_safe=component.source_excerpt,
+                verification="source_roundtrip",
+            )],
+        ))
+    return tuple(claims)
 
 
 def _disclosed_metric_match_keys(retrieval_query: str) -> tuple[str, ...]:
@@ -1054,6 +1125,13 @@ class NarrativeTool:
                         continue
                     period_claim_count += 1
                     output_id = f"{task.task_id}.investment-sum"
+                    component_claims = _investment_sum_component_claims(
+                        task_id=task.task_id, corp_name=corp_name,
+                        aggregate=aggregate, doc_id=sec.doc_id,
+                        receipt=rc, section_id=sec.section_id,
+                        locator=h.locator or sec.locator,
+                    )
+                    claims.extend(component_claims)
                     claims.append(AnswerClaim(
                         output_id=output_id,
                         label=(
@@ -1064,6 +1142,8 @@ class NarrativeTool:
                         canonical_value=format(aggregate.value_won, "f"),
                         canonical_unit="원",
                         operator="sum",
+                        derived_from=[claim.output_id
+                                      for claim in component_claims],
                         citations=[ClaimCitation(
                             doc_id=sec.doc_id, rcept_no=rc,
                             section_id=sec.section_id,
