@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.tools.narrative import (
     _authority_roundtripped_text,
     _business_axis_score,
@@ -129,3 +131,24 @@ def test_subsidiary_appendix_is_not_authorized_without_the_report_reference():
 
     assert _referenced_subsidiary_product_chunk_ids(rows) == frozenset()
     assert _referenced_holding_product_role_chunk_ids(rows) == frozenset()
+
+
+@pytest.mark.parametrize("topic", ["주요 사업 내용", "주요 제품 및 서비스"])
+def test_verified_subsidiary_profile_excludes_unrelated_appendix_sections(topic):
+    row = _chunks(_REFERENCE)[1]
+    task = SimpleNamespace(retrieval_query=topic)
+    hit = SimpleNamespace(
+        section_id=row.section_id,
+        path=row.path, text_prompt_safe=row.text_prompt_safe,
+        subsidiary_products_reference_verified=True,
+    )
+
+    text = _authority_roundtripped_text(
+        task, hit, row, row.text_prompt_safe, "business_axis")
+
+    assert text is not None
+    body = _strip_prompt_boundaries(text)
+    assert body.startswith("(주)예시금속\n\n1. 사업의 개요")
+    assert "특수강봉강" in body
+    assert "시장 전망" not in body
+    assert "원재료 및 생산설비" not in body

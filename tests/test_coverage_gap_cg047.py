@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from dataclasses import replace
 
+import pytest
+
 from agent.disclosed_metric_topics import (
     DisclosedMetricTopicRegrounder,
     disclosed_metric_for_query,
@@ -11,6 +13,7 @@ from agent.disclosed_metric_topics import (
 from agent.semantic_intent_v1 import SemanticIntent
 from app.tools.narrative import (
     NarrativeTool,
+    _authority_bound_requested_slots,
     _relevance_filtered_disclosed_metric_hits,
 )
 
@@ -142,3 +145,40 @@ def test_broad_chapter_hint_can_still_fallback_to_exact_topic_hit():
         doc_groups=("periodic",), date_from=None)
 
     assert selected[0].chunk_id == "exact-topic"
+
+
+def test_exact_disclosed_metric_topic_does_not_report_its_own_slot_missing():
+    task = SimpleNamespace(
+        retrieval_query=_TOPIC,
+        requested_slots=(_TOPIC,),
+    )
+    assert _authority_bound_requested_slots(task, None) == (_TOPIC,)
+
+
+def test_disclosed_metric_topic_does_not_confirm_a_narrower_unrequested_value():
+    task = SimpleNamespace(
+        retrieval_query=_TOPIC,
+        requested_slots=("회사채 미상환 잔액",),
+    )
+    assert _authority_bound_requested_slots(task, None) == ()
+
+
+@pytest.mark.parametrize(("query", "slot"), [
+    ("가동률", "평균 가동률"),
+    ("자금조달 실적", _TOPIC),
+])
+def test_authority_bound_metric_slot_accepts_only_declared_topic_aliases(query, slot):
+    task = SimpleNamespace(retrieval_query=query, requested_slots=(slot,))
+
+    assert _authority_bound_requested_slots(task, None) == (slot,)
+
+
+@pytest.mark.parametrize("query", [
+    "주요 계약 조건",
+    "가동률의 하락 원인",
+    "가동률과 생산능력",
+])
+def test_self_named_slot_does_not_prove_unknown_or_qualified_topic(query):
+    task = SimpleNamespace(retrieval_query=query, requested_slots=(query,))
+
+    assert _authority_bound_requested_slots(task, None) == ()

@@ -762,6 +762,7 @@ class NarrativeTool:
         claims, lims, used = [], [], []
         missing_cells: list[str] = []
         completed_cells: list[str] = []
+        proved_topic_slots: set[str] = set()
         cell_claim_output_ids: list[tuple[str, tuple[str, ...]]] = []
         if fanout.omitted_cells:
             lims.append(Limitation(
@@ -806,6 +807,11 @@ class NarrativeTool:
                 aggregation_request=(
                     aggregation_request if not matrix else None))
             if cell_claims:
+                proved_topic_slots.update(_authority_bound_requested_slots(
+                    SimpleNamespace(
+                        retrieval_query=cell.topic,
+                        requested_slots=task.requested_slots),
+                    _narrative_authority_kind(cell_task)))
                 completed_cells.append(cell.cell_id)
                 cell_claim_output_ids.append((
                     cell.cell_id, tuple(claim.output_id for claim in cell_claims)))
@@ -844,7 +850,9 @@ class NarrativeTool:
         if (matrix and task.requested_slots and claims
                 and not topic_bound_fields):
             body = " ".join(claim.text or "" for claim in claims)
-            missing_slots = [slot for slot in task.requested_slots if not _slot_present(slot, body)]
+            missing_slots = [slot for slot in task.requested_slots
+                             if slot not in proved_topic_slots
+                             and not _slot_present(slot, body)]
             if missing_slots:
                 lims.append(Limitation(
                     code="slot_not_confirmed",
@@ -1518,6 +1526,19 @@ def _authority_bound_requested_slots(task, authority_kind: str | None) -> tuple[
         return ()
     query = getattr(task, "retrieval_query", "")
     query_key = _compact_heading(query)
+    if authority_kind is None and len(slots) == 1:
+        # A disclosed-metric query has its own ontology-backed retrieval path.
+        # When its sole requested slot names that same topic, a matched source
+        # chunk can prove the topic even if the filing repeats the heading only
+        # in its canonical path and not in every individual table row.
+        metric = disclosed_metric_for_query(query)
+        metric_keys = {
+            _compact_heading(surface)
+            for surface in getattr(metric, "surfaces", ()) if surface
+        } if metric is not None else set()
+        if (query_key in metric_keys
+                and _compact_heading(slots[0]) in metric_keys):
+            return slots
     if authority_kind == "business_axis":
         query_kind = _business_axis_kind(query)
         if query_kind in {"business", "products", "revenue", "subsidiaries"}:
@@ -1701,6 +1722,8 @@ def _business_axis_kind(retrieval_query: str) -> str:
         return "revenue"
     if "제품" in compact or "서비스" in compact:
         return "products"
+    if re.fullmatch(r"(?:주요|핵심)?사업(?:의)?(?:내용|개요|부문)?", compact):
+        return "business"
     # A non-boilerplate topic together with an otherwise business-shaped
     # request (e.g. a technology, energy source or product family) requires a
     # locally stated business activity, not merely a shareholder reference.
@@ -2884,7 +2907,7 @@ def _authority_roundtripped_text(
                     or not _has_explicit_subsidiary_product_detail(
                         roundtripped_chunk)):
                 return None
-            if _business_axis_kind(task.retrieval_query) == "business":
+            if _business_axis_kind(task.retrieval_query) in {"business", "products"}:
                 roundtripped_chunk = _referenced_subsidiary_product_excerpt(
                     roundtripped_chunk)
                 if roundtripped_chunk is None:
