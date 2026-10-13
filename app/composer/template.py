@@ -2140,6 +2140,80 @@ def _attribution_conclusion(payload, question: str | None) -> str | None:
             "속하는지는 공시만으로 특정되지 않습니다.")
 
 
+def _contract_completion_transition(change: str) -> str | None:
+    """Summarize a verified planned-to-signed loan/guarantee change."""
+
+    text = _display_text(change or "")
+    text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"\s*\[사유:[^\]]+\]\s*$", "", text)
+    if text.count(" → ") != 1:
+        return None
+    before, after = (" ".join(side.split())
+                     for side in text.split(" → ", 1))
+    if not all(marker in before and marker in after
+               for marker in ("차입계약", "보증계약")):
+        return None
+    if ("예정" not in before
+            or re.search(r"체결(?:됨|됐|되었|완료)", after) is None):
+        return None
+    date = re.search(
+        r"(?P<year>20\d{2})년\s*(?P<month>\d{1,2})월\s*"
+        r"(?P<day>\d{1,2})일",
+        after,
+    )
+    if date is None:
+        return None
+    signed_date = (
+        f"{date.group('year')}-{int(date.group('month')):02d}-"
+        f"{int(date.group('day')):02d}"
+    )
+
+    parts = []
+    before_amounts = set(re.findall(
+        r"\$\s*[\d,]+(?:\.\d+)?\s*(?:M|B)?", before, re.I))
+    after_amounts = set(re.findall(
+        r"\$\s*[\d,]+(?:\.\d+)?\s*(?:M|B)?", after, re.I))
+    shared_amounts = before_amounts & after_amounts
+    if shared_amounts and "당사로 이관" in before and "당사로 이관" in after:
+        amount = sorted(shared_amounts)[0].replace(" ", "")
+        parts.append(
+            f"기존 보증액 {amount}의 당사 이관은 예정에서 완료로 바뀌었습니다.")
+    parts.append(
+        "차입·보증계약은 기존 채권자와 세부 내용을 논의해 체결할 "
+        f"예정이었으나, {signed_date} 체결됐다고 정정됐습니다.")
+    if ("협의 완료" in before and "변동" in before
+            and re.search(r"(?<!\S)라\s*\.\s*\(삭제\)", after)):
+        parts.append(
+            "채권자 협의 완료를 전제로 하고 보증 총액 등 일부 변동 "
+            "가능성을 적은 종전 문구도 삭제됐습니다.")
+    return " ".join(parts)
+
+
+def _contract_completion_correction_conclusion(claims) -> str | None:
+    """Lead with the verified completion transition, with its correction cite."""
+
+    candidates = []
+    for claim in claims:
+        if (claim.operator != "correction_diff"
+                or not _is_narrative_correction(claim)):
+            continue
+        summary = _contract_completion_transition(claim.text or "")
+        if summary is None:
+            continue
+        receipt = next((
+            citation.rcept_no for citation in (claim.citations or ())
+            if citation.rcept_no
+            and re.fullmatch(r"\d{14}", citation.rcept_no)
+        ), None)
+        date_prefix = (
+            f"{receipt[:4]}-{receipt[4:6]}-{receipt[6:8]} 정정에서 "
+            if receipt else "정정에서 "
+        )
+        candidates.append(f"{date_prefix}{summary}{_cite(claim)}")
+    unique = list(dict.fromkeys(candidates))
+    return unique[0] if len(unique) == 1 else None
+
+
 def _correction_conclusion(claims, *, reject_increase: bool = False) -> str | None:
     """Lead with the material typed correction instead of its row count."""
 
@@ -2189,6 +2263,12 @@ def _narrative_correction_summary(claims) -> str | None:
                   and _is_narrative_correction(claim)]
     if not narratives:
         return None
+    if _contract_completion_correction_conclusion(claims):
+        narratives = [claim for claim in narratives
+                      if _contract_completion_transition(
+                          claim.text or "") is None]
+        if not narratives:
+            return None
     rooted = [
         claim for claim in narratives
         if re.search(r"계약 식별 접수번호 \d{14}", claim.label or "")
@@ -3381,14 +3461,18 @@ class TemplateComposer:
             if scope_message:
                 lines.append(scope_message)
         attribution = _attribution_conclusion(p, question)
-        conclusion = attribution or _correction_conclusion(
-            p.claims,
-            reject_increase=(
-                any(verdict.verdict == "false"
-                    for verdict in p.premise_verdicts)
-                or bool(question and re.search(r"늘|증가|커진|10\s*조", question))
-            ),
-        )
+        contract_transition = _contract_completion_correction_conclusion(
+            p.claims)
+        conclusion = (attribution or contract_transition
+                      or _correction_conclusion(
+                          p.claims,
+                          reject_increase=(
+                              any(verdict.verdict == "false"
+                                  for verdict in p.premise_verdicts)
+                              or bool(question and re.search(
+                                  r"늘|증가|커진|10\s*조", question))
+                          ),
+                      ))
         asks_correction_inventory = bool(question and re.search(
             r"정정\s*(?:이력|내역|내용)|변경\s*(?:이력|내역|내용)|"
             r"(?:전체|모든)[^?\n]{0,20}(?:정정|변경)|정정\s*전후\s*흐름",
@@ -3444,7 +3528,9 @@ class TemplateComposer:
             if claim.label == "기준시점 공시 상태"
         ]
         state_table = _event_state_table(states)
-        if conclusion and not state_table and not source_scope_limited:
+        if contract_transition:
+            lines.append(contract_transition)
+        elif conclusion and not state_table and not source_scope_limited:
             lines.append(conclusion)
         correction_reasons = [
             claim for claim in p.claims
