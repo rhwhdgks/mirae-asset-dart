@@ -7,7 +7,7 @@ task kind(financial · event · disclosure · correction · document · narrativ
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from app.orchestrator.payload import AnswerClaim, Limitation, PremiseVerdict, TraceEvent
 from app.orchestrator.runner import PlanExecution
@@ -28,6 +28,62 @@ from agent.contracts import (
 from agent.contracts import FactSpec, ResolvedFinancialTask
 
 _SUBJECT_PARTICLES = ("가", "이", "은", "는", "의")
+
+
+def _completed_scope_difference_pairs(plan, claims) -> set[frozenset[str]]:
+    """Prove an explicitly planned scope gap without hiding other mismatches."""
+
+    by_id = {claim.output_id: claim for claim in claims}
+    if len(by_id) != len(claims):
+        return set()
+    coordinates = {
+        fact.output_id: (
+            fact.corp_code, fact.concept, fact.period_start, fact.period_end,
+            fact.period_type, fact.cumulative, fact.statement,
+            task.as_of, task.view,
+        )
+        for task in plan.tasks if task.kind == "financial"
+        for fact in task.facts
+    }
+
+    def verified_number(claim):
+        if (claim is None or not claim.citations
+                or not (claim.canonical_unit or claim.raw_unit)
+                or any(cite.verification != "verified" for cite in claim.citations)):
+            return False
+        value = (claim.canonical_value if claim.canonical_value is not None
+                 else claim.value_text)
+        if value is None:
+            return False
+        try:
+            return Decimal(value.replace(",", "")).is_finite()
+        except (InvalidOperation, ValueError):
+            return False
+
+    completed: set[frozenset[str]] = set()
+    for derivation in plan.derivations:
+        if (derivation.operator not in {"difference", "absolute_difference"}
+                or len(derivation.operands) != 2
+                or any(ref.field != "value" for ref in derivation.operands)):
+            continue
+        operand_ids = tuple(ref.output_id for ref in derivation.operands)
+        pair = frozenset(operand_ids)
+        if len(pair) != 2 or any(value not in coordinates for value in pair):
+            continue
+        if coordinates[operand_ids[0]] != coordinates[operand_ids[1]]:
+            continue
+        if any(other.operator not in {"difference", "absolute_difference", "equal"}
+               and pair <= {ref.output_id for ref in other.operands}
+               for other in plan.derivations):
+            continue
+        result = by_id.get(derivation.output_id)
+        if (not verified_number(result)
+                or result.operator != derivation.operator
+                or tuple(result.derived_from) != operand_ids
+                or not all(verified_number(by_id.get(value)) for value in operand_ids)):
+            continue
+        completed.add(pair)
+    return completed
 
 
 def _requests_document_change_details(plan, task) -> bool:
@@ -519,8 +575,10 @@ class CanonicalToolBackend:
         여부가 다른 서로 다른 집계 범위다(이슈 #64/RPC-003 이 기간 길이에
         대해 하는 일과 같은 뜻이고, 축만 시간이 아니라 범위다). 두 값이
         함께 답에 실리면 그 차이를 「전년 대비 증감률」 같은 시간 증감으로
-        부르지 않도록 무조건 고지한다 — 사용자가 판단을 요청했는지와
-        무관하다(#64 선례와 동일한 설계).
+        부르지 않도록 고지한다. 다만 그 범위 차이 자체를 명시적으로
+        요청했고, 같은 좌표·기준일·view의 검증된 원값과 그 둘에 결속된
+        성공한 차이 계산이 있으면 요청을 완전히 수행한 것이다. 이 경우
+        scope 차이를 누락 근거로 취급하지 않는다.
 
         `plan.tasks` 의 FactSpec 을 직접 훑는다. CFS/SFS 짝
         (`financial/parallel-scope-retrieval`)은 파생을 만들지 않는 순수
@@ -528,6 +586,7 @@ class CanonicalToolBackend:
         """
 
         base_ids = {claim.output_id for claim in claims if not claim.derived_from}
+        completed_differences = _completed_scope_difference_pairs(plan, claims)
         by_axis: dict[tuple, dict[str, str]] = {}
         for task in plan.tasks:
             for fact in (getattr(task, "facts", None) or []):
@@ -549,6 +608,8 @@ class CanonicalToolBackend:
         limitations: list[Limitation] = []
         for scoped in by_axis.values():
             if set(scoped) != {"CFS", "SFS"}:
+                continue
+            if frozenset(scoped.values()) in completed_differences:
                 continue
             pair = ", ".join(scoped[key] for key in ("CFS", "SFS"))
             limitations.append(Limitation(

@@ -50,6 +50,8 @@ class _Snapshot(CanonicalReadModel):
             _fact("20260310000001", "2025-12-31", 500, concept="total_assets"),
             _fact("20260505000001", "2025-12-31", 550, concept="total_assets"),
             _fact("20260520000001", "2025-12-31", 900, concept="total_assets"),
+            _fact("20260520000001", "2026-03-31", 9_000, concept="total_assets"),
+            _fact("20260520000001", "2026-03-31", 9_999, period_type="quarter"),
         )
         self.docs = (
             SimpleNamespace(doc_id="periodic_20250310000001", rcept_dt="20250310",
@@ -215,19 +217,20 @@ def test_standalone_quarter_uses_restatement_for_both_cumulative_operands(
     assert all(row.citations[0].rcept_no == "20260310000001" for row in originals)
 
 
-def test_instant_year_end_stays_with_requested_year_report_family():
+def test_instant_year_end_uses_latest_restatement_of_that_same_balance_date():
     snapshot = _Snapshot()
     question = "가상테크의 2025년 연결 자산총계는 얼마야?"
     plan = _plan(snapshot, _intent(concept="자산총계", periods=("2025년",),
                                    operation="retrieve", fields=("얼마",)), question)
 
-    assert plan.tasks[0].as_of == "20260505"
+    assert plan.tasks[0].as_of == _CUTOFF
+    assert plan.tasks[0].facts[0].period_end == date(2025, 12, 31)
     originals, _ = _execute(snapshot, plan)
-    assert Decimal(originals[0].canonical_value) == Decimal(550)
-    assert originals[0].citations[0].rcept_no == "20260505000001"
+    assert Decimal(originals[0].canonical_value) == Decimal(900)
+    assert originals[0].citations[0].rcept_no == "20260520000001"
 
 
-def test_instant_year_end_pin_never_overrides_explicit_earlier_as_of():
+def test_instant_year_end_never_overrides_explicit_earlier_as_of():
     snapshot = _Snapshot()
     question = "2026년 3월 15일 기준 가상테크의 2025년 연결 자산총계는 얼마야?"
     plan = _plan(snapshot, _intent(concept="자산총계", periods=("2025년",),
@@ -236,6 +239,51 @@ def test_instant_year_end_pin_never_overrides_explicit_earlier_as_of():
     assert plan.tasks[0].as_of <= "20260315"
     originals, _ = _execute(snapshot, plan)
     assert Decimal(originals[0].canonical_value) == Decimal(500)
+
+
+def test_latest_disclosure_does_not_replace_requested_annual_period_with_current_quarter():
+    snapshot = _Snapshot()
+    question = "가상테크의 2025년 연결 매출액은 얼마야?"
+    plan = _plan(snapshot, _intent(periods=("2025년",), operation="retrieve",
+                                   fields=("매출액",)), question)
+
+    fact = plan.tasks[0].facts[0]
+    assert (fact.period_start, fact.period_end, fact.period_type) == (
+        date(2025, 1, 1), date(2025, 12, 31), "annual")
+    originals, _ = _execute(snapshot, plan)
+    assert Decimal(originals[0].canonical_value) == Decimal(155)
+
+
+def test_year_end_balance_comparison_keeps_each_date_at_the_shared_cutoff():
+    snapshot = _Snapshot()
+    snapshot.rows += (
+        _fact("20250310000001", "2024-12-31", 200, concept="total_assets"),
+        _fact("20260520000001", "2024-12-31", 250, concept="total_assets"),
+    )
+    question = "가상테크의 2025년 말과 2024년 말 연결 자산총계 차이를 알려줘."
+    plan = _plan(snapshot, _intent(concept="자산총계"), question)
+
+    assert {task.as_of for task in plan.tasks} == {_CUTOFF}
+    assert [fact.period_end for task in plan.tasks for fact in task.facts] == [
+        date(2025, 12, 31), date(2024, 12, 31)]
+    originals, derived = _execute(snapshot, plan)
+    assert [Decimal(row.canonical_value) for row in originals] == [Decimal(900), Decimal(250)]
+    assert Decimal(derived[0].canonical_value) == Decimal(650)
+
+
+def test_unread_later_restatement_still_reports_incomplete_coverage(monkeypatch):
+    snapshot = _Snapshot()
+    monkeypatch.setattr(snapshot, "_unread_docs", lambda *args, **kwargs: (
+        "periodic_20260610000001",))
+    question = "가상테크의 2025년 연결 자산총계는 얼마야?"
+    plan = _plan(snapshot, _intent(concept="자산총계", periods=("2025년",),
+                                   operation="retrieve", fields=("얼마",)), question)
+
+    outcome, = FinancialTool(snapshot).run_task(plan.tasks[0], trace=[])
+    assert outcome.claim is not None
+    assert Decimal(outcome.claim.canonical_value) == Decimal(900)
+    assert outcome.limitation.code == "partial_unread"
+    assert outcome.limitation.affected_doc_ids == ["periodic_20260610000001"]
 
 
 def test_unparseable_explicit_as_of_is_not_replaced_with_corpus_cutoff():

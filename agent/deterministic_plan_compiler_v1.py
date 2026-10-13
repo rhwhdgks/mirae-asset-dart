@@ -456,9 +456,10 @@ class FinancialComparisonResolution(_StrictFrozenModel):
                     raise ValueError(
                         "financial relation은 기간, statement scope, view 중 한 축만 달라야 합니다")
                 if (not same_scope
-                        and self.requested_operators != ["absolute_difference"]):
+                        and self.requested_operators not in (
+                            ["absolute_difference"], ["difference"])):
                     raise ValueError(
-                        "scope comparison은 absolute_difference 하나만 요청할 수 있습니다")
+                        "scope comparison은 absolute_difference 또는 difference 하나만 요청할 수 있습니다")
                 if not same_scope and first.as_of != second.as_of:
                     raise ValueError(
                         "scope comparison operands는 동일한 as_of여야 합니다")
@@ -10035,7 +10036,7 @@ def _build_financial_comparison_typed_plan(
                     "annual retrieve relation operator가 잘못되었습니다")
         elif intent_item.operation == "compare":
             allowed = (
-                {"absolute_difference"}
+                {"absolute_difference", "difference"}
                 if operands[0].scope != operands[1].scope
                 else {"difference"}
                 if operands[0].view != operands[1].view
