@@ -468,6 +468,7 @@ def _investment_rows(
 
     lines = _source_body(text).splitlines()
     found: list[tuple[str, str, str, str, str, str | None]] = []
+    incomplete_rows = False
     index = 0
     while index < len(lines):
         if not lines[index].lstrip().startswith("|"):
@@ -501,7 +502,12 @@ def _investment_rows(
             if len(row) <= needed or _is_table_rule(row):
                 continue
             values = tuple(row[positions[role]] for role in ("투자대상", "목적", "금액", "기간"))
-            if any(not value for value in values):
+            if any(not value.strip() for value in values):
+                # Do not let one complete row make the compact projection
+                # look like the whole source table when another disclosed
+                # row has an unreported target, purpose, amount, or period.
+                # The caller will fall back to the full category-table view.
+                incomplete_rows = True
                 continue
             spent = row[spent_position] if spent_position is not None else None
             if spent is not None and not spent.strip():
@@ -509,7 +515,7 @@ def _investment_rows(
             typed = (*values, unit, spent)
             if typed not in found:
                 found.append(typed)
-    return tuple(found)
+    return () if incomplete_rows else tuple(found)
 
 
 def _bounded_table_summary(prefix: str, rows: list[str], *, limit: int) -> str:
@@ -648,9 +654,16 @@ def _investment_plan_table(
         if len(block) < 3:
             continue
         header = _table_cells(block[0])
-        if (not header or not _is_table_rule(_table_cells(block[1]))
-                or not any("투자계획" in _compact_key(value)
-                           for value in header)):
+        if not header or not _is_table_rule(_table_cells(block[1])):
+            continue
+        compact_header = tuple(_compact_key(value) for value in header)
+        explicit_plan_header = any("투자계획" in value for value in compact_header)
+        context = _compact_key("\n".join(lines[max(0, start - 10):start]))
+        complete_project_roles = (
+            len(_investment_header_positions(header))
+            == len(_INVESTMENT_SLOT_HEADERS))
+        if not (explicit_plan_header or
+                (complete_project_roles and "투자" in context and "계획" in context)):
             continue
         rows = tuple(
             tuple(row)
@@ -718,7 +731,7 @@ def _investment_plan_summary(
     label_index = next((
         index for index, value in enumerate(compact)
         if value in {"구분", "투자항목", "투자유형", "투자분류"}
-    ), 0)
+    ), _investment_header_positions(header).get("투자대상", 0))
     labels = tuple(row[label_index] for row in rows if len(row) > label_index)
     has_execution = any(
         any(marker in value for marker in ("실적", "기지출", "집행", "기투자"))
@@ -6800,6 +6813,10 @@ class NarrativeDigest:
             plan_table = _investment_plan_table(claim.text)
             if plan_table:
                 header, plan_rows, unit = plan_table
+                display_rows = tuple(
+                    tuple(value if value.strip() else "원문에 기재되지 않음"
+                          for value in row)
+                    for row in plan_rows)
                 rows.extend((
                     _investment_plan_summary(header, plan_rows, citation=citation),
                     _public_table_caption(public_label, header)
@@ -6812,8 +6829,16 @@ class NarrativeDigest:
                         for value in (*header, "근거")) + "|",
                     *("| " + " | ".join(
                         _markdown_cell(value) for value in (*row, citation)) + " |"
-                      for row in plan_rows),
+                      for row in display_rows),
                 ))
+                if any(not value.strip() for row in plan_rows for value in row):
+                    rows.append(
+                        "비어 있는 셀은 원문에 기재되지 않은 항목으로 표시했습니다.")
+                if any(value.strip() in {"-", "–", "—", "―"}
+                       for row in plan_rows for value in row):
+                    rows.append(
+                        "표의 대시 표시는 원문 그대로이며, 0원이나 미집행으로 "
+                        "해석하지 않았습니다.")
                 continue
             plan = _investment_plan_digest(claim.text, limit=1100)
             if plan:
