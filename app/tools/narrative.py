@@ -622,7 +622,17 @@ class NarrativeTool:
             return tuple(ordered)[:TOP_K]
 
         hits = _collect_sections(section_hints)
-        if not hits or all(_bearing_rank(h) > 0 for h in hits):
+        # A broad chapter hint (for example 「II. 사업의 내용」) is only a
+        # discovery area, so an alias-only hit can justify searching the rest
+        # of the selected report for a more exact topic match. A numbered,
+        # topic-specific subsection such as 「III. 재무 > 7. 증권 발행」 is
+        # already the authority boundary; widening it can mix in a different
+        # section with a similar word (CG-047: securities issuance vs liquidity
+        # funding). If that exact subtree has no lexical hit, fail closed.
+        has_broad_section_hint = any(
+            ">" not in str(path_prefix) for path_prefix in section_hints)
+        if (has_broad_section_hint
+                and (not hits or all(_bearing_rank(h) > 0 for h in hits))):
             # 「II. 사업의 내용」에 표기 자체가 없고 별칭만 스친 경우(한화오션 신규수주는
             # 재무 주석 표에만 있다) 문서 전체에서 다시 찾아 정본 표기 chunk 를 앞세운다.
             whole = _collect(None)
