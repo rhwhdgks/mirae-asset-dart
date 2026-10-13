@@ -659,6 +659,22 @@ def _path_segments(surface: str | None) -> tuple[str, ...]:
         if value)
 
 
+def _is_financing_purpose_path(path: str | None) -> bool:
+    """Match the purpose table by meaning, not its form-specific number."""
+
+    segments = _path_segments(path)
+    return bool(segments) and re.fullmatch(
+        r"\d+자금조달의목적", segments[0]) is not None
+
+
+def _is_bond_issuance_amount_path(path: str | None) -> bool:
+    """Select only the form's aggregate bond face amount, not investor rows."""
+
+    segments = _path_segments(path)
+    return (len(segments) == 1 and re.fullmatch(
+        r"\d+사채의권면(?:전자등록)?총액원", segments[0]) is not None)
+
+
 def _surface_unit(surface: str | None) -> str | None:
     """Infer only an explicitly labelled scalar unit from a field surface."""
 
@@ -2617,6 +2633,20 @@ class DisclosureTool(BaseTool):
                                 + ", ".join(receipts)),
                         affected_doc_ids=receipts))
         requested_slots = list(task.requested_slots)
+        financing_type_keywords = {
+            "유상증자", "전환사채", "신주인수권부사채", "교환사채",
+        }
+        selector_keywords = set(
+            getattr(task.event_selector, "keywords", ()) or ())
+        if (task.operation == "list" and task.event_selector
+                and "조달유형" in requested_slots
+                and selector_keywords & financing_type_keywords):
+            # The canonical disclosure form is the typed authority for an
+            # explicit issuance-type list.  A generic leaf search for
+            # "구분/종류" can be ambiguous among unrelated fields and must not
+            # override or contradict that form-level classification.
+            requested_slots = [
+                slot for slot in requested_slots if slot != "조달유형"]
         if any(s in {"해지사유", "해지 주요사유"}
                for s in requested_slots):
             # The terse form row is not always the complete disclosed reason.
@@ -2853,10 +2883,49 @@ class DisclosureTool(BaseTool):
                     raw_unit=_surface_unit(row.path), text=row.value,
                     citations=[_cite_field(row)]))
 
+            issue_amount_rows = []
+            compact_form = re.sub(r"\s+", "", form)
+            if any(kind in compact_form for kind in (
+                    "전환사채권발행결정", "신주인수권부사채권발행결정",
+                    "교환사채권발행결정")):
+                for candidate in selected_rows:
+                    if not _is_bond_issuance_amount_path(candidate.path):
+                        continue
+                    verified = self.fidx.verified(candidate)
+                    amount = _decimal_scalar(verified.value)
+                    if (verified.evidence_status == "verified"
+                            and amount is not None):
+                        issue_amount_rows.append((verified, amount))
+            # Bond forms disclose one aggregate face amount. Investor-level
+            # allocation rows are not substitutes; ambiguous aggregates fail
+            # closed rather than being summed or guessed.
+            if len(issue_amount_rows) == 1:
+                amount_row, amount = issue_amount_rows[0]
+                claims.append(AnswerClaim(
+                    output_id=(f"{task.task_id}.financing.{selected}."
+                               "issuance_amount"),
+                    label=f"{form} 발행결정액",
+                    value_text=amount_row.value,
+                    raw_unit="원",
+                    canonical_value=str(amount),
+                    canonical_unit="원",
+                    text=f"{amount:,.0f}원",
+                    citations=[_cite_field(amount_row)],
+                ))
+
             purpose_rows = []
+            requested_surfaces = tuple(
+                re.sub(r"\s+", "", str(slot))
+                for slot in tuple(getattr(task, "requested_slots", ()) or ()))
+            financing_type_list = (
+                bool(set(getattr(task.event_selector, "keywords", ()) or ())
+                     & {"유상증자", "전환사채", "신주인수권부사채", "교환사채"})
+                and any("자금조달" in slot for slot in requested_surfaces))
+            include_purpose_detail = (
+                not financing_type_list
+                or any("자금조달의목적" in slot for slot in requested_surfaces))
             for candidate in selected_rows:
-                if not _path_segments(candidate.path)[:1] == (
-                        _path_segments("4. 자금조달의 목적")[0],):
+                if not _is_financing_purpose_path(candidate.path):
                     continue
                 verified = self.fidx.verified(candidate)
                 if (verified.evidence_status != "verified"
@@ -2869,20 +2938,22 @@ class DisclosureTool(BaseTool):
             total_cites = []
             for row, amount in purpose_rows:
                 total_cites.append(_cite_field(row))
-                claims.append(AnswerClaim(
-                    output_id=(f"{task.task_id}.financing.{selected}.purpose."
-                               f"{row.order}"),
-                    label=f"최신 유효본 {row.label}",
-                    value_text=row.value, raw_unit="원",
-                    text=f"{row.label} {amount:,.0f}원",
-                    citations=[_cite_field(row)]))
+                if include_purpose_detail:
+                    claims.append(AnswerClaim(
+                        output_id=(f"{task.task_id}.financing.{selected}.purpose."
+                                   f"{row.order}"),
+                        label=f"최신 유효본 {row.label}",
+                        value_text=row.value, raw_unit="원",
+                        text=f"{row.label} {amount:,.0f}원",
+                        citations=[_cite_field(row)]))
             if purpose_rows:
-                claims.append(AnswerClaim(
-                    output_id=f"{task.task_id}.financing.{selected}.total",
-                    label="최신 유효본 총 조달금액",
-                    value_text=f"{total:,.0f}", raw_unit="원",
-                    canonical_value=str(total), canonical_unit="원",
-                    text=f"{total:,.0f}원", citations=total_cites))
+                if len(issue_amount_rows) != 1:
+                    claims.append(AnswerClaim(
+                        output_id=f"{task.task_id}.financing.{selected}.total",
+                        label=f"{form} 공시상 총 조달금액",
+                        value_text=f"{total:,.0f}", raw_unit="원",
+                        canonical_value=str(total), canonical_unit="원",
+                        text=f"{total:,.0f}원", citations=total_cites))
 
             if len(members) > 1:
                 original = members[0]
@@ -2890,8 +2961,7 @@ class DisclosureTool(BaseTool):
                     task.corp_code, as_of=task.as_of, rcept_no=original))
                 original_purposes = []
                 for candidate in original_rows:
-                    if not _path_segments(candidate.path)[:1] == (
-                            _path_segments("4. 자금조달의 목적")[0],):
+                    if not _is_financing_purpose_path(candidate.path):
                         continue
                     verified = self.fidx.verified(candidate)
                     amount = _decimal_scalar(verified.value)
@@ -2943,7 +3013,10 @@ class DisclosureTool(BaseTool):
             "신주인수권부사채": "BW(신주인수권부사채)",
             "교환사채": "EB(교환사채)",
         }
-        for keyword in getattr(task.event_selector, "keywords", ()) or ():
+        keywords = tuple(getattr(task.event_selector, "keywords", ()) or ())
+        start = getattr(task.event_selector, "event_from", None)
+        end = getattr(task.event_selector, "event_to", None)
+        for keyword in keywords:
             label = aliases.get(keyword, keyword)
             confirmed = keyword in surfaces
             cites = (claims[0].citations if confirmed and claims else [])
@@ -2966,17 +3039,95 @@ class DisclosureTool(BaseTool):
                     label=f"{label} 확인 여부", state="not_found_in_scope",
                     text=f"{scope} 범위에서 확인되지 않음",
                     citations=fallback_cites))
+        # A decision filing records intended face value, not necessarily cash
+        # received. For a full calendar-year query, separately surface the
+        # year's verified consolidated cash-flow line for CB issuance. This
+        # is an issuer/year total, not proof that a particular decision's full
+        # face amount was paid, so duplicates or partial-year scopes fail
+        # closed.
+        cashflow_claim = None
+        year = (start[:4] if start and end
+                and re.fullmatch(r"\d{8}", start)
+                and re.fullmatch(r"\d{8}", end)
+                and start[4:] == "0101" and end[4:] == "1231"
+                and start[:4] == end[:4] else None)
+        has_cb_decision = any(
+            "전환사채권발행결정" in re.sub(r"\s+", "", surface)
+            for surface in observed_surfaces)
+        if (year and "전환사채" in set(keywords)
+                and has_cb_decision):
+            facts_reader = getattr(self.rm, "facts", None)
+            fact_verifier = getattr(self.rm, "verify_fact_evidence", None)
+            evidence_reader = getattr(self.rm, "get_evidence", None)
+            if callable(facts_reader) and callable(fact_verifier) and callable(evidence_reader):
+                candidates = [
+                    row for row in facts_reader(
+                        task.corp_code, as_of=task.as_of,
+                        scope="CFS", statement="CF",
+                        period_end=f"{year}-12-31", cumulative=True)
+                    if (row.period_start == f"{year}-01-01"
+                        and row.period_type == "annual"
+                        and re.sub(r"\s+", "", row.account_path or "")
+                        == "재무활동현금흐름>전환사채의발행")
+                ]
+                # A unique candidate is required before evidence verification;
+                # silently dropping an unverified duplicate could select the
+                # wrong annual report.
+                if len(candidates) == 1:
+                    fact = fact_verifier(candidates[0])
+                    amount = fact.money.in_won_decimal()
+                    evidence = (evidence_reader(fact.evidence_id)
+                                if fact.evidence_id else None)
+                    receipt_match = re.search(r"(\d{14})", fact.doc_id or "")
+                    if (fact.evidence_status == "verified"
+                            and fact.value_status == "literal"
+                            and amount is not None and amount >= 0
+                            and evidence is not None and receipt_match):
+                        receipt = receipt_match.group(1)
+                        citation = ClaimCitation(
+                            doc_id=fact.doc_id,
+                            rcept_no=receipt,
+                            evidence_id=fact.evidence_id,
+                            locator=fact.locator,
+                            excerpt_prompt_safe=evidence.excerpt_safe,
+                            report_name=self.rm.document_label(fact.doc_id),
+                            source_path=" > ".join(
+                                str(value).strip() for value in
+                                (fact.statement_title, fact.account_path)
+                                if value and str(value).strip()),
+                        )
+                        cashflow_claim = AnswerClaim(
+                            output_id=f"{task.task_id}.financing.cash_flow_inflow",
+                            label=(f"{year}년 연결 현금흐름표 전환사채 발행 "
+                                   "현금 유입"),
+                            value_text=fact.money.text,
+                            raw_unit=fact.money.unit,
+                            canonical_value=str(amount),
+                            canonical_unit="원",
+                            text=(f"{year}년 연결 현금흐름표의 ‘전환사채의 발행’에는 "
+                                  f"현금 유입 {amount:,.0f}원이 기록되어 있습니다."),
+                            citations=[citation],
+                        )
+                        claims.append(cashflow_claim)
         if claims:
+            if cashflow_claim is not None:
+                boundary_text = (
+                    "연결 현금흐름표에서 전환사채 발행에 따른 연간 현금 유입은 "
+                    "확인됩니다. 다만 이는 개별 발행결정의 납입 상태나 액면총액 "
+                    "전액의 납입을 직접 확인하는 수치가 아닙니다.")
+                boundary_citations = list(claims[0].citations)
+                boundary_citations.extend(cashflow_claim.citations)
+            else:
+                boundary_text = (
+                    "위 건수와 금액은 발행을 결정한 공시 기준입니다. "
+                    "결정 공시만으로 실제 납입 완료나 돈을 조달한 사실을 "
+                    "확정할 수 없습니다.")
+                boundary_citations = claims[0].citations
             claims.append(AnswerClaim(
                 output_id=f"{task.task_id}.financing.execution_boundary",
                 label="결정과 실제 조달의 구분", state="not_inferred",
-                text=("위 건수와 금액은 발행을 결정한 공시 기준입니다. "
-                      "결정 공시만으로 실제 납입 완료나 돈을 조달한 사실을 "
-                      "확정할 수 없습니다."),
-                citations=claims[0].citations))
-        keywords = tuple(getattr(task.event_selector, "keywords", ()) or ())
-        start = getattr(task.event_selector, "event_from", None)
-        end = getattr(task.event_selector, "event_to", None)
+                text=boundary_text,
+                citations=boundary_citations))
         if len(set(keywords) & set(aliases)) == 4 and start and end:
             # An excluded type is still a member of the bounded issuer/year
             # document universe.  List its identity, never its amount as

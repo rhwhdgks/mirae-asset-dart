@@ -3504,12 +3504,54 @@ class TemplateComposer:
                 f"{label_text}{_josa(label_text, '은', '는')}"
                 f"{suffix} 확인되지 않았습니다.")
 
-        lines.append("정정 계보와 최신 유효본:")
-        lines.extend(self._claim_line(claim) for claim in lineages)
+        type_amounts = [
+            claim for claim in claims
+            if (claim.output_id or "").endswith((
+                ".issuance_amount", ".total"))
+        ]
+        if type_amounts:
+            lines.append("유형별 결정 공시 금액:")
+            lines.extend(self._claim_line(claim) for claim in type_amounts)
+
+        cashflow_claims = [
+            claim for claim in claims
+            if (claim.output_id or "").endswith(
+                ".financing.cash_flow_inflow")
+        ]
+        if cashflow_claims:
+            lines.append("후속 재무제표의 실제 현금 유입:")
+            lines.extend(self._claim_line(claim) for claim in cashflow_claims)
+
+        execution_boundaries = [
+            claim for claim in claims
+            if (claim.output_id or "").endswith(".financing.execution_boundary")
+        ]
+        lines.extend(self._claim_line(claim) for claim in execution_boundaries)
+        excluded_documents = [
+            claim for claim in claims
+            if ".financing.excluded." in (claim.output_id or "")
+        ]
+        if excluded_documents:
+            lines.append("요청한 네 유형 밖의 공시:")
+            lines.extend(self._claim_line(claim) for claim in excluded_documents)
+
+        lineage_members = [(claim, members(claim)) for claim in lineages]
+        if len(lineage_members) > 1 or any(
+                len(chain) > 1 for _claim, chain in lineage_members):
+            has_corrections = any(len(chain) > 1
+                                  for _claim, chain in lineage_members)
+            lines.append("정정 계보와 최신 유효본:" if has_corrections
+                         else "확인된 공시:")
+            lines.extend(self._claim_line(claim)
+                         for claim, _chain in lineage_members)
         detail_claims = [
             claim for claim in claims
             if ".financing." in (claim.output_id or "")
             and claim not in logical + lineages + type_claims
+            and claim not in type_amounts
+            and claim not in cashflow_claims
+            and claim not in execution_boundaries
+            and claim not in excluded_documents
         ]
         if detail_claims:
             lines.append("정정 전후 내용:" if any(
