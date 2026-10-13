@@ -2644,10 +2644,6 @@ def _demote_citations_to_basis(lines: list[str], start: int, end: int) -> None:
             lines[i] = lines[i][:tail.start()].rstrip()
 
 
-#: 표의 마지막 열이 근거일 때 그 값을 알아보는 표기.
-_TABLE_RECEIPT_CELL = re.compile(r"^접수번호\s*\d{14}$")
-
-
 #: 문장 끝에 붙는 인라인 근거. 출처를 하단에 모을 때 걷어낸다.
 _INLINE_CITATION = re.compile(r"\s*\(근거: [^)]*\)")
 
@@ -2866,9 +2862,11 @@ def _hoist_uniform_table_source(answer: str) -> str:
             value = values.pop()
             if not value or value == "-":
                 continue
-            # 근거 열은 접수번호일 때만 뺀다. 마지막 열이 값이면 그것은 데이터다.
+            # 근거 열은 공개 접수번호를 포함한 출처 표기만 묶는다. 마지막
+            # 열이 값이면 그것은 데이터다.
             if position == width - 1:
-                if header[-1] != "근거" or not _TABLE_RECEIPT_CELL.match(value):
+                if (header[-1] != "근거"
+                        or not _RECEIPT_NO.search(value)):
                     continue
                 hoists.append(f"근거: {value} (아래 표 전체)")
             else:
@@ -3169,11 +3167,48 @@ def _financial_trend_rows(payload, question: str | None):
     return sorted(rows, key=lambda row: (row[0], row[1]))
 
 
+def _financial_trend_citation(claim) -> str:
+    """Render each trend row's public source beside that year's value."""
+
+    sources: dict[tuple[str | None, str], list[str]] = {}
+    for citation in claim.citations or ():
+        receipt = citation.rcept_no
+        if not receipt or not re.fullmatch(r"\d{14}", receipt):
+            continue
+        key = (citation.report_name, receipt)
+        paths = sources.setdefault(key, [])
+        if citation.source_path and citation.source_path not in paths:
+            paths.append(citation.source_path)
+    if not sources:
+        return _cite(claim).removeprefix("(근거: ").removesuffix(")")
+
+    rendered = []
+    for (report, receipt), paths in sources.items():
+        parts = [report] if report else []
+        parts.append(f"접수번호 {receipt}")
+        if paths:
+            parts.append(" / ".join(paths))
+        rendered.append(" · ".join(parts))
+    return " / ".join(rendered)
+
+
 class TemplateComposer:
     def compose(self, payload, *, question: str | None = None) -> str:
-        text = _hoist_uniform_table_source(
-            _drop_repeated_lines(self._compose(payload, question=question)))
+        body = _drop_repeated_lines(self._compose(payload, question=question))
+        has_trend_table = "| 기간 | 금액 | 근거 |" in body.splitlines()
+        text = _hoist_uniform_table_source(body)
         text = _apply_display_units_directive(text, payload, question)
+        trend_rows = (_financial_trend_rows(payload, question)
+                      if has_trend_table else None)
+        if (trend_rows and all(any(
+                citation.rcept_no
+                and re.fullmatch(r"\d{14}", citation.rcept_no)
+                for citation in row[3].citations
+        ) for row in trend_rows)):
+            # The trend table carries each year's report, receipt, and source
+            # path beside its value. A second global source block would repeat
+            # those same citations without improving the row-to-source link.
+            return text
         # 출처는 마지막이다 — 위의 정리들이 본문만 보게 하고, 하단 블록이
         # 「같은 줄 반복」이나 「표의 균일 열」로 잘못 걸리지 않게 한다.
         return _with_source_footer(text, payload)
@@ -3202,7 +3237,9 @@ class TemplateComposer:
                      "| 기간 | 금액 | 근거 |", "|---|---|---|"]
             for year, quarter, _, claim, _ in trend:
                 period = f"{year}년" + (f" {quarter}분기" if quarter else "")
-                lines.append(f"| {period} | {_display_amount(claim)} | {_cite(claim)} |")
+                source = _financial_trend_citation(claim)
+                lines.append(
+                    f"| {period} | {_display_amount(claim)} | {source} |")
             lines.extend(self._public_notes(payload, question=question))
             return "\n".join(lines)
         amount_availability = _withheld_contract_amount_answer(payload, question)
