@@ -806,6 +806,7 @@ class NarrativeTool:
             aggregation_request: InvestmentAggregationRequest | None = None,
             ):
         claims, lims, used = [], [], []
+        requested_max_blocks = max_blocks
         proved_empty_selection = False
         corp_codes = tuple(task.corp_codes)
         ds = task.document_selector
@@ -822,6 +823,19 @@ class NarrativeTool:
             # This is an execution-only budget; no public QueryPlan field or
             # long-narrative guard is changed.
             max_blocks = min(max_blocks, 1)
+        if (authority_kind == "business_axis"
+                and _business_axis_kind(task.retrieval_query) == "products"
+                and ds is not None and getattr(ds, "rcept_no", None)):
+            # A product cell normally uses one structural block. If this exact
+            # filing explicitly sends subsidiary-product readers to its
+            # appendix, retain the issuer's own sentence plus each labelled
+            # product block authorized by that reference.
+            exact_rows = self._cached_exact_document_chunks(task)
+            referenced_product_ids = _referenced_subsidiary_product_chunk_ids(
+                exact_rows)
+            if referenced_product_ids:
+                max_blocks = min(
+                    requested_max_blocks, 1 + len(referenced_product_ids))
         # periods(compare): 각 기간별로 검색 (기간 종료일을 as_of 상한처럼 쓰지 않는다 — 문서 접수일 필터는 as_of)
         period_windows = []
         if task.periods:
@@ -1646,6 +1660,115 @@ def _has_substantive_product_map(body: str) -> bool:
                 "제조", "생산", "판매", "공급")) >= 3)
 
 
+def _has_explicit_subsidiary_product_detail(text: str) -> bool:
+    """Whether a block actually contains the subsidiary product subsection."""
+
+    body = _strip_prompt_boundaries(text)
+    heading = re.search(
+        r"(?:^|\s)2\s*[.)]?\s*주요\s*제품\s*(?:및|과)\s*서비스",
+        body,
+    )
+    if heading is None:
+        return False
+    excerpt = body[heading.end():heading.end() + NARRATIVE_BLOCK_CHARS]
+    if _has_substantive_product_map(excerpt):
+        return True
+    lines = excerpt.splitlines()
+    for index, line in enumerate(lines[:-2]):
+        if (not line.lstrip().startswith("|")
+                or not lines[index + 1].lstrip().startswith("|")
+                or not _is_table_rule(_table_cells(lines[index + 1]))):
+            continue
+        header = _table_cells(line)
+        product_columns = [
+            pos for pos, cell in enumerate(header)
+            if any(marker in _compact_heading(cell)
+                   for marker in ("제품", "품목", "상품", "서비스"))
+        ]
+        if len(product_columns) != 1:
+            continue
+        end = index + 2
+        while end < len(lines) and lines[end].lstrip().startswith("|"):
+            end += 1
+        entries = {
+            _compact_heading(cells[product_columns[0]])
+            for row in lines[index + 2:end]
+            if len(cells := _table_cells(row)) == len(header)
+            and not _is_table_rule(cells)
+            and _compact_heading(cells[product_columns[0]])
+            not in {"", "기타", "합계", "소계", "총계"}
+        }
+        if entries:
+            return True
+    # Some subsidiaries disclose a short prose-only service description under
+    # the same explicit heading rather than a table (for example, a sales
+    # subsidiary). Keep that sentence only when it names both an offering and
+    # an operating action.
+    return bool(re.search(
+        r"(?:제품|서비스|소재|품목|단조품|합금).{0,120}"
+        r"(?:생산|제조|판매|유통|공급|제공)|"
+        r"(?:생산|제조|판매|유통|공급|제공).{0,120}"
+        r"(?:제품|서비스|소재|품목|단조품|합금)",
+        excerpt,
+    ))
+
+
+def _referenced_subsidiary_product_chunk_ids(rows) -> frozenset[str]:
+    """Authorize appendix product blocks only when this filing points to them.
+
+    A few holding-company reports put their own activities under section 2 and
+    explicitly direct readers to section 7 for subsidiary products. Section 7
+    is otherwise excluded from business-axis retrieval because it contains
+    unrelated industry, R&D, risk, and outlook material. Follow only that
+    same-document cross-reference, and only its labelled subsidiary product
+    blocks.
+    """
+
+    rows = tuple(rows or ())
+    doc_ids = {getattr(row, "doc_id", None) for row in rows}
+    if len(doc_ids) != 1 or None in doc_ids:
+        return frozenset()
+    has_reference = any(
+        "사업의내용" in _compact_heading(getattr(row, "path", ""))
+        and "주요제품" in _compact_heading(getattr(row, "path", ""))
+        and "종속" in _compact_heading(getattr(row, "text_prompt_safe", ""))
+        and "기타참고사항" in _compact_heading(getattr(row, "text_prompt_safe", ""))
+        and "참고하시기바랍니다" in _compact_heading(
+            getattr(row, "text_prompt_safe", ""))
+        for row in rows
+    )
+    if not has_reference:
+        return frozenset()
+
+    by_section: dict[str, list[tuple[int, object]]] = {}
+    for index, row in enumerate(rows):
+        section_id = getattr(row, "section_id", None)
+        path = _compact_heading(getattr(row, "path", ""))
+        if (not section_id or "사업의내용" not in path
+                or "기타참고사항" not in path):
+            continue
+        by_section.setdefault(section_id, []).append((index, row))
+
+    allowed: set[str] = set()
+    for section_rows in by_section.values():
+        section_rows.sort(key=lambda item: (
+            int(match.group(1)) if (match := re.search(
+                r"/PART\[(\d+)\]$", getattr(item[1], "locator", "")))
+            else item[0]))
+        subsidiary_start = next((position for position, (_index, row)
+                                 in enumerate(section_rows)
+                                 if "주요종속회사사업의내용" in _compact_heading(
+                                     getattr(row, "text_prompt_safe", ""))), None)
+        if subsidiary_start is None:
+            continue
+        for _index, row in section_rows[subsidiary_start:]:
+            chunk_id = getattr(row, "chunk_id", None)
+            if (chunk_id and _has_explicit_subsidiary_product_detail(
+                    getattr(row, "text_prompt_safe", ""))):
+                allowed.add(chunk_id)
+    return frozenset(allowed)
+
+
 def _topic_has_local_activity(body: str, anchors: tuple[str, ...]) -> bool:
     """Require a requested topic and a business action in one local window.
 
@@ -1711,7 +1834,8 @@ def _is_business_narrative_query(retrieval_query: str, *, exact_document: bool =
     return exact_document and bool(_business_axis_anchors(retrieval_query))
 
 
-def _business_axis_score(task, row) -> int:
+def _business_axis_score(
+        task, row, *, allow_subsidiary_products: bool = False) -> int:
     """Rank a Section-II chunk only when it proves the requested business axis.
 
     The path says which disclosure child a chunk belongs to; its own leading
@@ -1728,6 +1852,13 @@ def _business_axis_score(task, row) -> int:
     body = _business_text(row)
     child_score = _business_child_score(getattr(row, "path", ""))
     kind = _business_axis_kind(query)
+    referenced_subsidiary_products = (
+        allow_subsidiary_products and kind == "products"
+        and "기타참고사항" in path
+        and _has_explicit_subsidiary_product_detail(
+            getattr(row, "text_prompt_safe", None)
+            or getattr(row, "text", ""))
+    )
 
     # The corp_code filter proves which filing owns a chunk; it does not prove
     # that a paragraph inside a consolidated filing describes the selected
@@ -1778,6 +1909,11 @@ def _business_axis_score(task, row) -> int:
         child_score += 34
     elif kind == "business" and ("부문별손익" in path or "영업실적" in path):
         child_score -= 28
+    if child_score <= 0 and referenced_subsidiary_products:
+        # Section 7 is not a business authority by default. The exception is
+        # a labelled product subsection in the same filing, reached only
+        # through its explicit section-2 cross-reference.
+        child_score = 24
 
     # An exact receipt is not sufficient authority for a business answer when
     # it only supplies a finance/reference/R&D child.  A topic may use another
@@ -1855,7 +1991,7 @@ def _business_axis_score(task, row) -> int:
         # 발행인에도 같은 규칙이 적용된다.
         product_markers = (
             "주요제품", "제품및서비스", "제품", "상품", "서비스", "품목", "브랜드")
-        head = body[:1800]
+        head = body[:NARRATIVE_BLOCK_CHARS if referenced_subsidiary_products else 1800]
         if not _count_markers(path + head, product_markers):
             return 0
         if "주요제품" in path or "제품및서비스" in path:
@@ -2280,7 +2416,12 @@ def _prioritize_authority_hits(
     if authority_kind == "business_axis":
         return tuple(sorted(
             hits,
-            key=lambda hit: (-_business_axis_score(task, hit), hit.rank, hit.rcept_dt, hit.chunk_id),
+            key=lambda hit: (
+                -_business_axis_score(
+                    task, hit,
+                    allow_subsidiary_products=bool(getattr(
+                        hit, "subsidiary_products_reference_verified", False))),
+                hit.rank, hit.rcept_dt, hit.chunk_id),
         ))
     if authority_kind == "investment_plan":
         if prefer_latest:
@@ -2323,8 +2464,24 @@ def _exact_document_authority_hits(
                 doc_id=doc_id, projection="llm"))
         except (TypeError, ValueError):
             return ()
-    hits = tuple(
-        SimpleNamespace(
+    rows = tuple(rows)
+    referenced_product_ids = (
+        _referenced_subsidiary_product_chunk_ids(rows)
+        if authority_kind == "business_axis" else frozenset())
+    hits = []
+    for index, row in enumerate(rows, start=1):
+        allow_subsidiary_products = row.chunk_id in referenced_product_ids
+        if row.rcept_dt > task.as_of:
+            continue
+        if authority_kind == "business_axis":
+            authorized = _business_axis_score(
+                task, row,
+                allow_subsidiary_products=allow_subsidiary_products) > 0
+        else:
+            authorized = _authority_hit_matches(task, row, authority_kind)
+        if not authorized:
+            continue
+        hits.append(SimpleNamespace(
             rank=index, chunk_id=row.chunk_id, section_id=row.section_id,
             doc_id=row.doc_id, source_file_id=row.source_file_id,
             corp_code=getattr(row, "corp_code", corp_code),
@@ -2333,11 +2490,9 @@ def _exact_document_authority_hits(
             rcept_dt=row.rcept_dt, path=row.path, locator=row.locator,
             text_prompt_safe=row.text_prompt_safe,
             evidence_id=getattr(row, "evidence_id", None),
-        )
-        for index, row in enumerate(rows, start=1)
-        if row.rcept_dt <= task.as_of
-        and _authority_hit_matches(task, row, authority_kind)
-    )
+            subsidiary_products_reference_verified=allow_subsidiary_products,
+        ))
+    hits = tuple(hits)
     hits = _prioritize_authority_hits(task, hits, authority_kind)
     if authority_kind == "slot_table" and len(hits) != 1:
         return ()
@@ -2483,7 +2638,21 @@ def _authority_roundtripped_text(
             issuer_names = (corp_name,)
         return _investment_table_rows_for_issuer(table, issuer_names)
     if authority_kind == "business_axis":
-        if _business_axis_score(task, hit) <= 0 or _business_axis_score(task, section) <= 0:
+        follows_verified_subsidiary_reference = bool(getattr(
+            hit, "subsidiary_products_reference_verified", False))
+        if _business_axis_score(
+                task, hit,
+                allow_subsidiary_products=follows_verified_subsidiary_reference) <= 0:
+            return None
+        if follows_verified_subsidiary_reference:
+            if (getattr(hit, "section_id", None)
+                    != getattr(section, "section_id", None)
+                    or "기타참고사항" not in _compact_heading(
+                        getattr(section, "path", ""))
+                    or not _has_explicit_subsidiary_product_detail(
+                        roundtripped_chunk)):
+                return None
+        elif _business_axis_score(task, section) <= 0:
             return None
         return _issuer_owned_business_text(task, roundtripped_chunk)
     if authority_kind == "investment_plan":
