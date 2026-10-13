@@ -50,13 +50,22 @@ _EXACT_DAY_WORD = re.compile(
 def _is_literal_investment_judgment_document_request(item: Any) -> bool:
     """이 항목이 날짜가 특정된 「투자판단관련주요경영사항」 리터럴 서식 요청인가."""
 
+    # 날짜는 의미 파서에 따라 target qualifier에 놓이기도 하고 기간/scope에
+    # 놓이기도 한다. 서식명과 날짜가 질문에서 명시된 같은 요청을 놓치지 않도록
+    # 두 축을 함께 확인한다.
+    scope = item.scope
     surfaces = (
         item.target.surface, *item.target.qualifier_surfaces,
-        *item.output.field_surfaces)
+        *item.output.field_surfaces,
+        *scope.target_period_expressions,
+        *scope.scope_qualifier_expressions,
+        scope.as_of_expression, scope.document_group_expression,
+    )
     if not any(_INVESTMENT_JUDGMENT_FORM_WORD.search(surface)
-               for surface in surfaces):
+               for surface in surfaces if isinstance(surface, str)):
         return False
-    return any(_EXACT_DAY_WORD.search(surface) for surface in surfaces)
+    return any(_EXACT_DAY_WORD.search(surface) for surface in surfaces
+               if isinstance(surface, str))
 
 
 class DisclosedMetricTopicError(RuntimeError):
