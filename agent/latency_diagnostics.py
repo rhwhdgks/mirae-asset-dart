@@ -7,7 +7,8 @@ import time
 
 _events = ContextVar("latency_diagnostic_events", default=None)
 _STAGES = {"provider_http", "provider_limiter", "transport_attempt",
-           "transport_backoff", "stage1_resolve", "stage1_plan"}
+           "transport_backoff", "stage1_resolve", "stage1_plan",
+           "retrieval_validation", "compose"}
 
 
 def record_latency_event(stage: str, **fields) -> None:

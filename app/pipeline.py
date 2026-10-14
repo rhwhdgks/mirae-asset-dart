@@ -7,6 +7,7 @@ from __future__ import annotations
 import app.env  # noqa: F401  (.env 자동 로드)
 from app.composer import HcxComposer, TemplateComposer, build_answer_response
 from app.orchestrator import Orchestrator
+from agent.latency_diagnostics import latency_span
 
 
 class AnswerPipeline:
@@ -20,15 +21,17 @@ class AnswerPipeline:
             runtime_annotations: dict | None = None,
             deadline_monotonic: float | None = None,
             ) -> tuple[dict, object]:
-        payload = self.orch.run(
-            handoff, question_id=question_id,
-            runtime_annotations=runtime_annotations)
-        if self.composer is not None:
-            text = self.composer.compose(
-                payload, question=question or None, trace=payload.trace,
-                deadline_monotonic=deadline_monotonic)
-        else:
-            from app.orchestrator.payload import TraceEvent
-            payload.trace.append(TraceEvent(seq=len(payload.trace)+1, stage="compose", summary="template composer", detail={}))
-            text = self.template.compose(payload, question=question or None)
+        with latency_span("retrieval_validation"):
+            payload = self.orch.run(
+                handoff, question_id=question_id,
+                runtime_annotations=runtime_annotations)
+        with latency_span("compose"):
+            if self.composer is not None:
+                text = self.composer.compose(
+                    payload, question=question or None, trace=payload.trace,
+                    deadline_monotonic=deadline_monotonic)
+            else:
+                from app.orchestrator.payload import TraceEvent
+                payload.trace.append(TraceEvent(seq=len(payload.trace)+1, stage="compose", summary="template composer", detail={}))
+                text = self.template.compose(payload, question=question or None)
         return build_answer_response(question_id, question, payload, text), payload
