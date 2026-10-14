@@ -4338,6 +4338,7 @@ def _validate_financial_resolution(
             "financial resolution kind가 다릅니다")
     if not coordinate.corp_name.strip():
         raise DeterministicPlanCompilerError("resolution corp_name이 비었습니다")
+    _financial_scalar_account_path(item)
 
     defaults = item.applied_defaults
     if not defaults:
@@ -4353,7 +4354,8 @@ def _validate_financial_resolution(
     unsupported = {
         default.policy for default in defaults
         if default.policy not in {
-            "primary_statement_scope", "canonical_company_alias_merge"}
+            "primary_statement_scope", "canonical_company_alias_merge",
+            "question_grounded_account_path"}
     }
     if unsupported:
         raise DeterministicPlanCompilerError(
@@ -5644,6 +5646,20 @@ def _validate_financial_comparison_resolution(
                 "operand evidence proof 결속이 다릅니다")
     _financial_view_account_paths(item, comparison)
     return item, None
+
+
+def _financial_scalar_account_path(resolution_item: ResolvedItem) -> str | None:
+    """Read an exact account path from digest-bound source authority."""
+    paths = [row for row in resolution_item.applied_defaults
+             if row.policy == "question_grounded_account_path"]
+    if not paths:
+        return None
+    if (len(paths) != 1
+            or not isinstance(resolution_item.resolution, FinancialResolution)
+            or paths[0].evidence_refs != ["question:financial-account-ancestor"]
+            or not paths[0].value.strip()):
+        raise DeterministicPlanCompilerError("scalar account path authority 결속이 다릅니다")
+    return paths[0].value
 
 
 def _financial_view_account_paths(
@@ -7724,7 +7740,7 @@ def _validate_slice_cross_authority(
             or fact.cumulative != coordinate.cumulative
             or fact.scope != coordinate.scope
             or fact.statement != coordinate.statement
-            or fact.account_path is not None
+            or fact.account_path != _financial_scalar_account_path(resolution_item)
             or fact.unit is not None):
         raise ValueError("execution plan fact coordinate가 resolution과 다릅니다")
 
@@ -9806,6 +9822,7 @@ def _build_typed_plan(
         cumulative=coordinate.cumulative,
         scope=coordinate.scope,
         statement=coordinate.statement,
+        account_path=_financial_scalar_account_path(resolution_item),
     )
     resolved_plan = ResolvedQueryPlan(
         revision=0,
@@ -9874,6 +9891,7 @@ def _build_premise_financial_typed_plan(
         period_start=coordinate.period_start, period_end=coordinate.period_end,
         period_type=coordinate.period_type, cumulative=coordinate.cumulative,
         scope=coordinate.scope, statement=coordinate.statement,
+        account_path=_financial_scalar_account_path(resolution_item),
     )
     claims = [PremiseClaim(
         claim_id=premise.premise_id, kind=premise.kind,
@@ -10392,6 +10410,7 @@ def _build_parallel_financial_retrieval_typed_plan(
         period_start=coordinate.period_start, period_end=coordinate.period_end,
         period_type=coordinate.period_type, cumulative=coordinate.cumulative,
         scope=coordinate.scope, statement=coordinate.statement,
+        account_path=_financial_scalar_account_path(resolution.items[index - 1]),
     ) for index, coordinate in enumerate(coordinates, start=1)]
     first = coordinates[0]
     resolved_plan = ResolvedQueryPlan(

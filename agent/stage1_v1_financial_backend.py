@@ -157,6 +157,11 @@ def _bare_concept_surface(surface: str) -> str:
     parenthesized = re.fullmatch(r"(?:capex|캐펙스)\s*\((.+)\)", value, re.IGNORECASE)
     if parenthesized is not None:
         value = parenthesized.group(1).strip()
+    ancestor = re.fullmatch(r"[A-Za-z0-9가-힣&+]+\s*중(?:에서)?\s*(.+)", value)
+    if ancestor is not None and resolve_metric_concept(ancestor.group(1)) is not None:
+        # The ancestor is bound separately to a verified source account path;
+        # it is not part of the financial concept's name.
+        value = ancestor.group(1).strip()
     return value or (surface or "").strip()
 
 
@@ -810,12 +815,19 @@ class FinancialResolutionBackend:
             if as_of is None:
                 return None          # 기준시점을 못 읽으면 확정하지 않는다 (cutoff 로 대체 금지)
             operand_account_paths = None
+            scalar_account_path = None
             if operand_views is not None:
                 operand_account_paths = _question_grounded_view_account_paths(
                     rows[0], item=item, question=question,
                     companies=self.companies, as_of=as_of)
                 if operand_account_paths is None:
                     return None
+            elif len(rows) == 1 and len(_question_account_ancestors(item, question)) == 1:
+                paths = _question_grounded_view_account_paths(
+                    rows[0], item=item, question=question,
+                    companies=self.companies, as_of=as_of)
+                if paths is not None:
+                    scalar_account_path = paths[0 if self.view == "as_filed" else 1]
             if ratio_presentation is not None:
                 payload = _ratio_payload_for(
                     rows[0], rows[1], as_of=as_of, view=self.view,
@@ -850,6 +862,13 @@ class FinancialResolutionBackend:
             )
             applied_defaults = _applied_defaults(
                 rows, alias_provenance=alias_provenance)
+            if scalar_account_path is not None:
+                applied_defaults.append({
+                    "policy": "question_grounded_account_path",
+                    "basis": "unique account ancestor at the requested filing view and cutoff",
+                    "value": scalar_account_path,
+                    "evidence_refs": ["question:financial-account-ancestor"],
+                })
             if operand_account_paths is not None:
                 applied_defaults.append({
                     "policy": "question_grounded_view_account_paths",
@@ -1026,6 +1045,14 @@ def _question_grounded_view_pair(
     return "as_filed", "restated"
 
 
+def _question_account_ancestors(item: Any, question: str) -> tuple[str, ...]:
+    target = re.escape(re.split(r"\s*중(?:에서)?\s*", item.target.surface.strip())[-1])
+    return tuple(dict.fromkeys(
+        match.group("ancestor").strip()
+        for match in re.finditer(
+            rf"(?P<ancestor>[A-Za-z0-9가-힣&+]+)\s*중(?:에서)?\s*{target}", question)))
+
+
 def _question_grounded_view_account_paths(
         row: FinancialCoordinate, *, item: Any, question: str,
         companies: Any, as_of: str,
@@ -1040,23 +1067,28 @@ def _question_grounded_view_account_paths(
 
     if not callable(getattr(companies, "facts", None)):
         return None
-    target = re.escape(item.target.surface.strip())
-    ancestors = list(dict.fromkeys(
-        match.group("ancestor").strip()
-        for match in re.finditer(
-            rf"(?P<ancestor>[A-Za-z0-9가-힣&+]+)\s*중(?:에서)?\s*{target}",
-            question)
-    ))
-    if len(ancestors) != 1:
+    ancestors = _question_account_ancestors(item, question)
+    if len(ancestors) > 1:
         return None
-    ancestor_key = normalize_surface_key(ancestors[0])
+    ancestor_key = normalize_surface_key(ancestors[0]) if ancestors else None
+
+    def matches_ancestor(path: str) -> bool:
+        if ancestor_key is None:
+            return True
+        # Match an account heading, not a substring: 유동자산 must not bind
+        # 비유동자산. Ignore only the source's heading number/punctuation.
+        return any(normalize_surface_key(re.sub(
+            r"^[\s0-9IVXivxⅠ-Ⅻⅰ-ⅻ.()]+", "", part)) == ancestor_key
+            for part in path.split(">")[:-1])
+
     candidates = [
         fact for fact in companies.facts(
             row.corp_code, as_of=as_of, concept=row.concept.value,
             scope=row.scope, statement=row.statement,
             period_end=row.period_end.isoformat(), cumulative=row.cumulative)
         if isinstance(getattr(fact, "account_path", None), str)
-        and ancestor_key in normalize_surface_key(fact.account_path)
+        and matches_ancestor(fact.account_path)
+        and getattr(fact, "period_type", None) == row.period_type
         and getattr(fact, "period_start", None) == (
             row.period_start.isoformat() if row.period_start is not None else None)
     ]

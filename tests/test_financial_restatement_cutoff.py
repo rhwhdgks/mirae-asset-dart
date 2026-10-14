@@ -1,6 +1,7 @@
 """Period comparisons use a shared cutoff, not each year's filing date."""
 
 from datetime import date
+from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -9,6 +10,9 @@ import pytest
 from agent.deterministic_plan_compiler_v1 import compile_stage1_v1_generic
 from agent.semantic_intent_v1 import SemanticIntent
 from agent.stage1_v1_financial_backend import FinancialResolutionBackend
+from agent.stage1_v1_backend_composition import (
+    ClosedFinancialComparisonRegrounder, QuestionGroundedFinancialRegrounder,
+)
 from app.tools.derivation import DerivationExecutor, VerifiedScalar
 from app.tools.financial import FinancialTool
 from src.canonical.read import CanonicalReadModel, FactRow, Money
@@ -67,6 +71,10 @@ class _Snapshot(CanonicalReadModel):
     @staticmethod
     def resolve_company(surface):
         return [SimpleNamespace(corp_code=_CORP, corp_name=_NAME)] if surface == _NAME else []
+
+    @staticmethod
+    def held_company_candidates(surface):
+        return []
 
     def _load_facts(self, corp_code):
         return self.rows if corp_code == _CORP else ()
@@ -292,5 +300,96 @@ def test_unparseable_explicit_as_of_is_not_replaced_with_corpus_cutoff():
         _Snapshot(), canonical_build_id="a" * 32, resolver_version="synthetic/1.0",
         reference_date=date(2026, 6, 19), corpus_cutoff=_CUTOFF,
     ).resolve(question_id="synthetic", question="가상테크의 연결 매출액 차이", source_intent=intent)
+
+    assert result is None
+
+
+@pytest.mark.parametrize(("as_of", "cutoff"), [("2026년 3월 15일", "20260315"),
+                                                ("2026년 6월 19일", "20260619")])
+def test_comparison_shape_repair_never_adds_observation_year_to_target_periods(as_of, cutoff):
+    question = f"{as_of} 기준 가상테크의 2025년과 2024년 연결 매출액 차이를 알려줘."
+    received = _intent(concept="매출액 차이", as_of=as_of, operation="retrieve",
+                       fields=("과 2024년 연결 매출액 차이",))
+    intent = ClosedFinancialComparisonRegrounder()(question, received)
+
+    assert list(intent.answer_items[0].scope.target_period_expressions) == ["2025년", "2024년"]
+    assert intent.answer_items[0].operation == "compare"
+    plan = _plan(_Snapshot(), intent, question)
+    assert {task.as_of for task in plan.tasks} == {cutoff}
+
+
+def test_view_comparison_without_an_ancestor_uses_each_unique_source_account_path():
+    snapshot = _Snapshot()
+    question = "가상테크의 2024년 연결 매출액을 최초 제출값과 최신 재작성값으로 나눠서 비교해줘."
+    intent = _intent(periods=("2024년",), qualifiers=("최초 제출값", "최신 재작성값"),
+                     fields=("최초 제출값", "최신 재작성값"))
+    intent = QuestionGroundedFinancialRegrounder(snapshot)(question, intent)
+    assert list(intent.answer_items[0].output.field_surfaces) == ["최초 제출값", "최신 재작성값", "비교"]
+    plan = _plan(snapshot, intent, question)
+
+    originals, derived = _execute(snapshot, plan)
+    assert [Decimal(row.canonical_value) for row in originals] == [Decimal(80), Decimal(110)]
+    assert Decimal(derived[0].canonical_value) == Decimal(30)
+
+
+def _ppe_snapshot():
+    snapshot = _Snapshot()
+    snapshot.rows = tuple(
+        replace(_fact(receipt, "2023-12-31", value, concept="total_assets"),
+                account_norm="ppe", account_raw="유형자산", account_path=path)
+        for receipt, value, path in (
+            ("20240310000001", 100, "Ⅱ. 비유동자산 > 유형자산"),
+            ("20260310000001", 120, "자산 > 비유동자산 > 유형자산"),
+            ("20260310000001", 900, "자산 > 금융업자산 > 유형자산"),
+        )
+    )
+    return snapshot
+
+
+@pytest.mark.parametrize("target", ["유형자산", "비유동자산 중 유형자산"])
+def test_explicit_account_ancestor_is_kept_for_a_scalar_restatement(target):
+    snapshot = _ppe_snapshot()
+    question = "가상테크의 2023년 말 연결 비유동자산 중 유형자산은 얼마야?"
+    intent = _intent(concept=target, periods=("2023년 말",), operation="retrieve", fields=("얼마",))
+    plan = _plan(snapshot, intent, question)
+
+    assert plan.tasks[0].facts[0].account_path == "자산 > 비유동자산 > 유형자산"
+    originals, _ = _execute(snapshot, plan)
+    assert Decimal(originals[0].canonical_value) == Decimal(120)
+
+
+def test_missing_account_ancestor_does_not_silently_pick_one_of_two_ppe_accounts():
+    snapshot = _ppe_snapshot()
+    question = "가상테크의 2023년 말 연결 유형자산은 얼마야?"
+    intent = _intent(concept="유형자산", periods=("2023년 말",), operation="retrieve", fields=("얼마",))
+    plan = _plan(snapshot, intent, question)
+
+    assert plan.tasks[0].facts[0].account_path is None
+    outcome, = FinancialTool(snapshot).run_task(plan.tasks[0], trace=[])
+    assert outcome.claim is None and outcome.clarification is not None
+
+
+def test_account_ancestor_matching_does_not_confuse_current_and_noncurrent_assets():
+    snapshot = _ppe_snapshot()
+    question = "가상테크의 2023년 말 연결 유동자산 중 유형자산은 얼마야?"
+    intent = _intent(concept="유형자산", periods=("2023년 말",), operation="retrieve", fields=("얼마",))
+    plan = _plan(snapshot, intent, question)
+
+    assert plan.tasks[0].facts[0].account_path is None
+    outcome, = FinancialTool(snapshot).run_task(plan.tasks[0], trace=[])
+    assert outcome.claim is None and outcome.clarification is not None
+
+
+def test_view_comparison_does_not_choose_between_competing_latest_account_paths():
+    snapshot = _Snapshot()
+    snapshot.rows += (replace(_fact("20260505000001", "2024-12-31", 500),
+                              account_path="another revenue account"),)
+    question = "가상테크의 2024년 연결 매출액을 최초 제출값과 최신 재작성값으로 나눠서 비교해줘."
+    intent = _intent(periods=("2024년",), qualifiers=("최초 제출값", "최신 재작성값"),
+                     fields=("최초 제출값", "최신 재작성값", "비교"))
+    result = FinancialResolutionBackend(
+        snapshot, canonical_build_id="a" * 32, resolver_version="synthetic/1.0",
+        reference_date=date(2026, 6, 19), corpus_cutoff=_CUTOFF,
+    ).resolve(question_id="synthetic", question=question, source_intent=intent)
 
     assert result is None

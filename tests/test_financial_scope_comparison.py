@@ -10,6 +10,7 @@ from agent.contracts import Derivation, FactSpec, OutputRef, ResolvedFinancialTa
 from agent.deterministic_plan_compiler_v1 import compile_stage1_v1_generic
 from agent.semantic_intent_v1 import SemanticIntent
 from agent.stage1_v1_financial_backend import FinancialResolutionBackend
+from agent.stage1_v1_backend_composition import ClosedFinancialRelationRegrounder
 from app.orchestrator.payload import AnswerClaim, ClaimCitation
 from app.tools.backend import CanonicalToolBackend
 from app.tools.derivation import DerivationExecutor, VerifiedScalar
@@ -147,7 +148,7 @@ def test_nonmonetary_but_same_unit_scope_difference_is_also_supported():
     assert _notice(plan, claims) == []
 
 
-def _native_plan(question):
+def _native_plan(question, *, flattened_surface=None):
     intent = SemanticIntent.model_validate({
         "schema_version": "stage1-semantic-intent/1.1",
         "entities": [{"entity_id": "entity-1", "kind_hint": "company", "surface": "가상제조"}],
@@ -164,6 +165,15 @@ def _native_plan(question):
         }],
         "answer_groups": [], "premises": [], "unresolved_mentions": [], "presentation": "auto",
     }, strict=True)
+    if flattened_surface is not None:
+        payload = intent.model_dump(mode="python")
+        item = payload["answer_items"][0]
+        item["operation"] = "retrieve"
+        item["target"]["surface"] = flattened_surface
+        item["scope"]["scope_qualifier_expressions"] = ["연결"]
+        item["output"].update({"shape": "scalar", "field_surfaces": [flattened_surface]})
+        intent = ClosedFinancialRelationRegrounder()(
+            question, SemanticIntent.model_validate(payload, strict=True))
     canonical = SimpleNamespace(resolve_company=lambda surface: [
         SimpleNamespace(corp_code="00000001", corp_name="가상제조")])
     result = FinancialResolutionBackend(
@@ -193,3 +203,24 @@ def test_two_conflicting_subtraction_directions_are_not_replaced_with_one_absolu
     assert _native_plan(
         "가상제조의 2025년 연결 매출액 - 별도 매출액 차이와 "
         "별도 매출액 - 연결 매출액 차이를 알려줘.") is None
+
+
+@pytest.mark.parametrize(("expression", "scopes"), [
+    ("연결 매출액 − 별도 매출액", ["CFS", "SFS"]),
+    ("별도 매출액 - 연결 매출액", ["SFS", "CFS"]),
+    ("별도 매출액에서 연결 매출액을 뺀 값", ["SFS", "CFS"]),
+])
+def test_flattened_literal_subtraction_is_repaired_before_native_resolution(expression, scopes):
+    plan = _native_plan(f"가상제조의 2025년 {expression}를 알려줘.", flattened_surface=expression)
+
+    assert plan is not None
+    assert [row.operator for row in plan.derivations] == ["difference"]
+    assert [fact.scope for task in plan.tasks for fact in task.facts] == scopes
+
+
+@pytest.mark.parametrize("question", [
+    "가상제조의 2025년 연결 매출액 - 별도 영업이익을 계산해줘.",
+    "가상제조의 2025년 연결 매출액 - 별도 매출액과 별도 매출액 - 연결 매출액을 계산해줘.",
+])
+def test_scope_subtraction_repair_requires_one_unambiguous_metric_and_direction(question):
+    assert ClosedFinancialRelationRegrounder._literal_scope_subtraction(question) is None
