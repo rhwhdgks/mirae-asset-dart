@@ -3816,6 +3816,30 @@ class CorrectionTool(BaseTool):
                         detail=(f"event_key={sequence.event_key}: "
                                 f"identity_status={sequence.identity_status}"),
                         affected_doc_ids=[sequence.root_receipt]))
+                identity_parts = []
+                identity_cites = []
+                for slot in ("계약명", "계약상대"):
+                    # The sequence already binds these observations to one
+                    # selected event. Read the latest verified identity cells
+                    # within that sequence, never an issuer-wide name match.
+                    for receipt in dict.fromkeys([
+                            *(step.rcept_no for step in reversed(sequence.steps)),
+                            sequence.root_receipt]):
+                        row, status = self.field_value(
+                            task.corp_code, receipt, slot,
+                            as_of=roles.as_of, trace=trace)
+                        if (status == "verified" and row is not None
+                                and str(row.value or "").strip()
+                                and str(row.value).strip() != "-"):
+                            identity_parts.append(f"{slot}: {row.value}")
+                            identity_cites.append(_cite_field(row))
+                            break
+                if identity_parts:
+                    claims.append(AnswerClaim(
+                        output_id=(f"{task.task_id}.contract-identity."
+                                   f"{sequence.root_receipt}"),
+                        label=f"계약 식별 공시 {sequence.root_receipt}",
+                        text="; ".join(identity_parts), citations=identity_cites))
                 for step in sequence.steps:
                     docs.append(step.rcept_no)
                     item_dates[step.rcept_no] = step.observed_at
@@ -4050,6 +4074,39 @@ class CorrectionTool(BaseTool):
 
 
 class DocumentTool(BaseTool):
+    def _ordered_version_members(self, members: tuple[str, ...], as_of: str):
+        """Use explicit canonical edges, not receipt sorting, for chronology.
+
+        A unique latest leaf need not imply a unique intermediate order.
+        Only a uniquely ordered chain may be displayed as an arrow sequence
+        or as successive effective intervals.
+        """
+        if len(members) <= 1:
+            return members
+        incoming = {member: set() for member in members}
+        for newer in members:
+            for relation in self.rm.relation_summaries(
+                    source_rcept_no=newer, as_of=as_of):
+                older = relation.dst_rcept_no
+                if (relation.relation_type in {"CORRECTS", "SUPERSEDES"}
+                        and relation.resolution_status == "resolved"
+                        and older in incoming):
+                    incoming[newer].add(older)
+        ordered = []
+        remaining = set(members)
+        while remaining:
+            ready = [member for member in remaining
+                     if not (incoming[member] & remaining)]
+            if len(ready) != 1:
+                return None
+            member = ready[0]
+            ordered.append(member)
+            remaining.remove(member)
+        dates = [self._rcept_dt(member) for member in ordered]
+        if any(not date for date in dates) or dates != sorted(dates):
+            return None
+        return tuple(ordered)
+
     def _version_change_claims(
             self, *, task, chain: tuple[str, ...], output_prefix: str,
             trace: list[TraceEvent], limitations: list[Limitation],
@@ -4246,37 +4303,77 @@ class DocumentTool(BaseTool):
                 lims.append(Limitation(code="ambiguous_document_version", detail=f"{s}: 최신본 후보 복수 {res.candidates}", affected_doc_ids=[s]))
             elif res.status == "invalid":
                 lims.append(Limitation(code="document_lineage_invalid", detail=f"{s}: 정정 계보 cycle", affected_doc_ids=[s]))
+            elif res.status == "not_found":
+                lims.append(Limitation(code="not_found", detail=f"{s}: 기준시점까지 문서 미확인", affected_doc_ids=[s]))
         if task.operation == "latest":
             # 사건 기준: seed들 중 as_of까지 접수된 가장 늦은 유효본
             resolved = [(s, r.selected) for s, r in latest_map.items() if r.status == "ok" and r.selected]
             if not resolved:
                 lims.append(Limitation(code="not_found", detail="최신본 확정 불가")); return claims, lims, used, None
-            # 각 seed의 최신본 접수일
-            best = None
-            for s, sel in resolved:
-                dt = self._rcept_dt(sel)
-                if best is None or dt > best[1]: best = (sel, dt, s)
-            sel, dt, seed = best
+            # Different seeds may resolve to the same proved leaf. Conversely,
+            # two unrelated leaves on the same day have no proved ordering.
+            # Do not choose whichever seed happened to be enumerated first.
+            by_leaf = {sel: (self._rcept_dt(sel), seed) for seed, sel in resolved}
+            if any(res.status in {"ambiguous", "invalid"}
+                   for res in latest_map.values()):
+                return claims, lims, used, None
+            latest_day = max(dt for dt, _seed in by_leaf.values())
+            latest = [sel for sel, (dt, _seed) in by_leaf.items()
+                      if dt == latest_day]
+            if len(latest) != 1 or not latest_day:
+                lims.append(Limitation(
+                    code="ambiguous_document_version",
+                    detail="같은 접수일의 최신본 후보 사이에 확정된 대체 관계가 없음",
+                    affected_doc_ids=sorted(latest)))
+                return claims, lims, used, None
+            sel = latest[0]
+            dt, seed = by_leaf[sel]
             claims.append(AnswerClaim(output_id=f"{task.task_id}.latest", label=f"기준시점 {task.as_of} 최신 공시",
                                       text=f"{sel} (접수 {dt}, seed {seed})", state=sel,
-                                      citations=self._doc_cites(task.corp_code, sel, task.as_of)))
+                                      citations=self._observation_cites(task.corp_code, sel, task.as_of)))
             used.append(sel)
         elif task.operation == "version_history":
             seen_chains: set[tuple[str, ...]] = set()
             for s, r in latest_map.items():
                 chain = tuple(getattr(r, "members", None) or (s,))
-                if chain in seen_chains:
+                family = tuple(sorted(chain))
+                if family in seen_chains:
                     continue
-                seen_chains.add(chain)
+                seen_chains.add(family)
+                if r.status != "ok":
+                    # An ambiguous/cyclic family proves visible filings, not
+                    # a chronology, an unchanged document or a latest version.
+                    for member in chain:
+                        citations = self._metadata_cites(
+                            task.corp_code, member, task.as_of)
+                        if citations:
+                            claims.append(AnswerClaim(
+                                output_id=f"{task.task_id}.{s}.observed-{member}",
+                                label="계보 미확정인 공시", text=member,
+                                citations=citations))
+                            used.append(member)
+                    continue
+                ordered = self._ordered_version_members(chain, task.as_of)
+                chronological = ordered is not None
+                if ordered is not None:
+                    chain = ordered
+                else:
+                    lims.append(Limitation(
+                        code="document_order_unavailable",
+                        detail="최신본은 확인되지만 중간 공시 전체의 유일한 선후 관계는 미확정",
+                        affected_doc_ids=list(chain)))
                 had_corr = len(chain) > 1
                 chain_cites = []
                 for member in chain:
-                    chain_cites.extend(self._doc_cites(
+                    chain_cites.extend(self._observation_cites(
                         task.corp_code, member, task.as_of))
                 claims.append(AnswerClaim(output_id=f"{task.task_id}.{s}", label="문서 정정 계보",
                                           state="corrected" if had_corr else "no_correction",
-                                          text=f"{'정정 있음: ' + ' → '.join(chain) if had_corr else '기준시점까지 정정 없음'}",
-                                          citations=chain_cites or self._doc_cites(
+                                          text=("정정 있음: " + " → ".join(chain)
+                                                if had_corr and chronological else
+                                                "정정 공시 확인(중간 순서 미확정): " + ", ".join(chain)
+                                                if had_corr else "기준시점까지 정정 없음"),
+                                          citations=chain_cites or self._observation_cites(
                                               task.corp_code, s, task.as_of)))
                 # Emit effective-version boundaries as source-derived facts.
                 # A wording model must not have to infer temporal direction
@@ -4284,7 +4381,7 @@ class DocumentTool(BaseTool):
                 # Same-day members deliberately get no clock ordering here;
                 # canonical SUPERSEDES below is the only authority for them.
                 member_dates = [self._rcept_dt(member) for member in chain]
-                for member_index, member in enumerate(chain):
+                for member_index, member in enumerate(chain if chronological else ()):
                     start = member_dates[member_index]
                     next_day = (
                         member_dates[member_index + 1]
@@ -4305,8 +4402,11 @@ class DocumentTool(BaseTool):
                         label="버전 유효 구간",
                         state=member,
                         text=interval_text,
-                        citations=self._doc_cites(
-                            task.corp_code, member, task.as_of),
+                        citations=(self._observation_cites(
+                            task.corp_code, member, task.as_of)
+                            + (self._observation_cites(
+                                task.corp_code, chain[member_index + 1], task.as_of)
+                               if next_day is not None else [])),
                     ))
                 selected = getattr(r, "selected", None)
                 if selected:
@@ -4315,7 +4415,7 @@ class DocumentTool(BaseTool):
                         label="논리적 최신본",
                         state=selected,
                         text=f"논리적 최신본은 {selected}",
-                        citations=self._doc_cites(
+                        citations=self._observation_cites(
                             task.corp_code, selected, task.as_of),
                     ))
                 # Receipt-number order is not a clock.  State a logical order
@@ -4339,8 +4439,8 @@ class DocumentTool(BaseTool):
                         text=(f"{previous} → {later} "
                               f"({later} 공시가 {previous} 공시를 대체)"),
                         citations=(
-                            self._doc_cites(task.corp_code, previous, task.as_of)
-                            + self._doc_cites(task.corp_code, later, task.as_of)),
+                            self._observation_cites(task.corp_code, previous, task.as_of)
+                            + self._observation_cites(task.corp_code, later, task.as_of)),
                     ))
                     if self._rcept_dt(previous) == self._rcept_dt(later):
                         affected = [previous, later]

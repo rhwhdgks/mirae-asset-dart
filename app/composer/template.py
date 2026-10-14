@@ -61,6 +61,7 @@ _REASON_KO = {
     "ambiguous_event_origin": "관련 공시는 확인되지만 원계약과 후속 공시의 연결은 공시만으로 특정할 수 없습니다.",
     "counterparty_not_reported_may_hide_match": "계약상대가 공개되지 않은 관련 후보 공시가 있어, 이 후보가 요청한 상대방의 계약인지 아닌지는 확인할 수 없습니다.",
     "intraday_order_unavailable": "공시의 정정 순서는 확인되지만 장중 접수시각이 없어 실제 제출 시각과 분·초 단위 선후는 확인할 수 없습니다.",
+    "document_order_unavailable": "최신본은 확인되지만 중간 공시 전체의 선후 관계가 확정되지 않아 순서를 추정하지 않았습니다.",
     "source_scope_prevents_complete_lineage": "제공된 자료보다 앞선 원공시가 없어 해당 공시의 최초 기재 내용과 그 이전 변경 이력은 확인할 수 없습니다.",
     "source_excerpt_boundary_unavailable": "검증된 원문 값은 있으나 공개 길이 안에 완결된 문장이나 항목 경계가 없어 내용을 중간에서 잘라 제시하지 않았습니다.",
     "comparison_explanation_excerpt_unavailable": "두 금액의 차이는 계산했지만 산정 근거 원문을 공개 길이 안에서 완결된 문장으로 제시할 수 없어 원인을 임의로 요약하지 않았습니다.",
@@ -1934,6 +1935,12 @@ def _correction_history_table(
         for match in [re.search(r"계약 식별 접수번호 (\d{14})", claim.label or "")]
         if match
     ))
+    contract_identities = {
+        match.group(1): claim
+        for claim in claims
+        for match in [re.fullmatch(r"계약 식별 공시 (\d{14})", claim.label or "")]
+        if match is not None and claim.text and claim.citations
+    }
     # 바로 위에 「공시 정정 이력: A → B → …」 줄이 있다. 같은 말을 두 번
     # 머리글로 쓰면 무엇이 다른 목록인지 알 수 없다.
     lines = ["정정별 변경 내용:", ""]
@@ -1956,7 +1963,16 @@ def _correction_history_table(
         evidence = citation.strip().removeprefix("(근거: ").removesuffix(")") or "-"
         cells = [date, field, change, evidence]
         if contract_receipts:
-            cells.insert(0, contract or "확인되지 않음")
+            identity = contract_identities.get(contract)
+            contract_cell = (
+                f"{identity.text} (식별 공시 {contract})"
+                if identity is not None else contract or "확인되지 않음")
+            if identity is not None:
+                identity_evidence = _cite(identity).strip().removeprefix(
+                    "(근거: ").removesuffix(")")
+                if identity_evidence and identity_evidence not in cells[-1]:
+                    cells[-1] += "; " + identity_evidence
+            cells.insert(0, contract_cell)
         lines.append("| " + " | ".join(
             _markdown_cell(cell) for cell in cells) + " |")
     return "\n".join(lines)
