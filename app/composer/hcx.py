@@ -33,7 +33,8 @@ from .definitions import required_definition_messages
 from .narrative_matrix import NarrativeDigest, NarrativeMatrix, verify_matrix_output
 from .template import (TemplateComposer, _investment_judgment_title_date_list,
                        _termination_membership_answer, _financial_trend_rows,
-                       _document_versions_at_requested_dates)
+                       _document_versions_at_requested_dates,
+                       _bounded_termination_observation_answer)
 
 
 def _with_subject_disclosure(text: str, payload, trace) -> str:
@@ -484,11 +485,7 @@ class HcxComposer:
                 or _document_versions_at_requested_dates(payload, question) is not None):
             _t("template composer (typed event collection boundary)")
             return template
-        if (payload.claims
-                and all(claim.state in {"no_termination_observed", "termination_observed"}
-                        for claim in payload.claims)
-                and any(claim.state == "no_termination_observed"
-                        for claim in payload.claims)):
+        if _bounded_termination_observation_answer(payload) is not None:
             # An observed absence within the supplied corpus is not proof
             # that no filing exists anywhere, or that the contract is valid.
             # Keep the tool's explicit scope and legal-status boundary.

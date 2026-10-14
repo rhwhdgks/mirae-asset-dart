@@ -879,6 +879,28 @@ def _event_state_table(states) -> str:
     return "\n".join(lines)
 
 
+def _bounded_termination_observation_answer(payload) -> str | None:
+    """Keep each observation date, including identical negative findings."""
+    claims = payload.claims
+    if (not claims
+            or not all(claim.state in {"no_termination_observed", "termination_observed"}
+                       and not claim.operator and not claim.derived_from
+                       and _event_state_time_key(claim) for claim in claims)
+            or not any(claim.state == "no_termination_observed" for claim in claims)):
+        return None
+    table = _event_state_table(claims)
+    if not table:
+        lines = [TemplateComposer()._claim_line(claim) for claim in claims]
+    else:
+        lines = [table, "",
+                 "이는 제공된 공시 자료에서 확인한 결과이며, 해지·종료 공시가 확인되지 "
+                 "않았다는 사실만으로 계약의 법적 유효성을 판단한 것은 아닙니다."]
+    notes = _event_qualification_notes(payload.limitations)
+    if notes:
+        _extend_public_qualifications(lines, notes)
+    return "\n".join(lines)
+
+
 def _withheld_contract_amount_answer(payload, question: str | None) -> str | None:
     """Answer an availability question from a complete set of withheld amounts."""
 
@@ -3373,6 +3395,9 @@ class TemplateComposer:
         dated_versions = _document_versions_at_requested_dates(payload, question)
         if dated_versions is not None:
             return dated_versions
+        bounded_observations = _bounded_termination_observation_answer(payload)
+        if bounded_observations is not None:
+            return bounded_observations
         extrema = [c for c in payload.claims if c.state == "argmax_summary"]
         if len(extrema) == 1 and extrema[0].value_text:
             summary = extrema[0]

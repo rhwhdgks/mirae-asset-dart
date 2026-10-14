@@ -233,3 +233,25 @@ def test_negative_filing_observation_cannot_lose_its_corpus_boundary_to_wording(
         payload, question="가상 공급계약에 해지 공시가 나왔어?")
     assert "제공된 공시 자료" in answer
     assert "법적 유효성을 뜻하지 않습니다" in answer
+
+
+def test_identical_negative_findings_at_different_dates_are_both_displayed():
+    claims = [AnswerClaim(
+        output_id="event.termination_observed@" + day,
+        label=f"가상 계약의 {day} 기준 해지·종료 공시 관측 여부",
+        state="no_termination_observed",
+        text="제공 자료에서 해지·종료 공시가 확인되지 않았습니다.",
+        citations=[ClaimCitation(
+            doc_id="exchange_" + receipt, rcept_no=receipt,
+            locator="document", verification="source_roundtrip",
+            excerpt_prompt_safe="가상 계약 공시")],
+    ) for day, receipt in (("20241231", "20240110900001"),
+                           ("20260619", "20251210900002"))]
+    payload = AnswerPayload(
+        question_id="two-observations", handoff_id="offline",
+        final_status="answer", claims=claims)
+    answer = TemplateComposer().compose(payload, question="두 날짜의 해지 공시 확인 여부는?")
+    assert "| 2024-12-31 |" in answer
+    assert "| 2026-06-19 |" in answer
+    assert "20240110900001" in answer and "20251210900002" in answer
+    assert "법적 유효성" in answer
