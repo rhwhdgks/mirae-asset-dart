@@ -28,7 +28,7 @@ _CORRECTION = re.compile(r"정정|변경\s*이력|정정\s*전후|변경\s*흐�
 # Mirrors the compiler's ``해지종료공시관측여부`` slot rule.
 _TERMINATION_OBSERVATION_QUESTION = re.compile(
     r"(?=[^.?!]*(?:해지|종료))(?=[^.?!]*공시)"
-    r"[^.?!]*(?:확인|존재|관측|여부)")
+    r"[^.?!]*(?:확인|존재|관측|여부|나왔|나온)")
 _FULL_DATE = re.compile(
     r"(?:(?P<year>(?:20)?[0-9]{2})\s*년\s*)?(?P<month>1[0-2]|0?[1-9])\s*월\s*(?P<day>3[01]|[12][0-9]|0?[1-9])\s*일?")
 _CUTOFF = re.compile(r"20[0-9]{2}\s*년\s*(?:1[0-2]|0?[1-9])\s*월\s*(?:3[01]|[12][0-9]|0?[1-9])\s*일?\s*까지")
@@ -56,6 +56,16 @@ class CanonicalLifecycleLike(Protocol):
     def resolve_company(self, name: str) -> list[CanonicalCompanyLike]: ...
     def fields(self, **kwargs: object) -> Iterable[Any]: ...
     def event_timeline(self, **kwargs: object) -> CanonicalTimelineLike | None: ...
+
+
+def is_literal_termination_filing_observation(item: Any) -> bool:
+    """A literal filing target with generic existence/observation output."""
+    fields = [re.sub(r"\s+", "", value) for value in item.output.field_surfaces]
+    return bool(
+        fields and all(value in {"확인된것", "여부", "유무", "확인여부", "공시여부"}
+                       for value in fields)
+        and re.fullmatch(r"(?:해지|종료)(?:[·ㆍ/](?:해지|종료))?공시",
+                         re.sub(r"\s+", "", item.target.surface)))
 
 
 LifecycleStatus = Literal["resolved", "ambiguous_same_day", "ambiguous_event"]
@@ -193,8 +203,9 @@ def _status_days(
     asks_status = False
     for item in intent.answer_items:
         fields = list(item.output.field_surfaces)
-        if not any(re.search(r"상태|유효|살아|해지|종료", value)
-                   for value in fields):
+        if (not is_literal_termination_filing_observation(item)
+                and not any(re.search(r"상태|유효|살아|해지|종료", value)
+                            for value in fields)):
             continue
         asks_status = True
         surfaces.extend(item.scope.target_period_expressions)
@@ -230,6 +241,11 @@ def _counterparty_terms(
         issuer: CanonicalCompanyLike | None,
         ) -> tuple[str, ...]:
     values: list[str] = []
+    named_observation_events = {
+        reference for item in intent.answer_items
+        if is_literal_termination_filing_observation(item)
+        for reference in item.target.entity_refs
+    }
     for entity in intent.entities:
         if entity.kind_hint == "counterparty":
             values.append(entity.surface)
@@ -238,7 +254,8 @@ def _counterparty_terms(
             if not (issuer is not None and len(found) == 1
                     and found[0].corp_code == issuer.corp_code):
                 values.append(entity.surface)
-        elif entity.kind_hint == "event":
+        elif (entity.kind_hint == "event"
+              and entity.entity_id not in named_observation_events):
             values.extend(re.findall(r"[A-Za-z가-힣]{2,}", entity.surface))
     return tuple(dict.fromkeys(value for value in values if value.strip()))
 
@@ -320,7 +337,15 @@ def _target_terms(intent: SemanticIntent) -> tuple[str, ...]:
     raw_tokens: list[str] = []
     values: list[str] = []
     for item in intent.answer_items:
-        for token in re.findall(r"[A-Za-z가-힣]{2,}", item.target.surface):
+        target_surface = item.target.surface
+        if is_literal_termination_filing_observation(item):
+            # Here the event entity names the contract, not a legal-person
+            # counterparty. Preserve its literal name as an identity filter.
+            target_surface += " " + " ".join(
+                entity.surface for entity in intent.entities
+                if entity.kind_hint == "event"
+                and entity.entity_id in item.target.entity_refs)
+        for token in re.findall(r"[A-Za-z가-힣]{2,}", target_surface):
             raw_tokens.append(token)
             compact = _key(token)
             if compact and compact not in {_key(value) for value in _TARGET_STOP}:

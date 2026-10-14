@@ -32,7 +32,8 @@ from .limitations import (append_public_qualifications,
 from .definitions import required_definition_messages
 from .narrative_matrix import NarrativeDigest, NarrativeMatrix, verify_matrix_output
 from .template import (TemplateComposer, _investment_judgment_title_date_list,
-                       _termination_membership_answer, _financial_trend_rows)
+                       _termination_membership_answer, _financial_trend_rows,
+                       _document_versions_at_requested_dates)
 
 
 def _with_subject_disclosure(text: str, payload, trace) -> str:
@@ -479,7 +480,8 @@ class HcxComposer:
             _t("template composer (typed chronological facts)")
             return template
         if (any(claim.state == "argmax_summary" for claim in payload.claims)
-                or _termination_membership_answer(payload, question) is not None):
+                or _termination_membership_answer(payload, question) is not None
+                or _document_versions_at_requested_dates(payload, question) is not None):
             _t("template composer (typed event collection boundary)")
             return template
         # A complete two-period arithmetic topology should not be re-bound to

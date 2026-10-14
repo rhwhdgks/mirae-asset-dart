@@ -151,6 +151,12 @@ def test_termination_conclusion_and_count_cite_each_actual_termination_body():
     count = next(c for c in claims if c.output_id.endswith(".terminated_count"))
     assert count.value_text == "2"
     assert {TERMINATION, other_termination} <= {c.rcept_no for c in count.citations}
+    answer = TemplateComposer().compose(AnswerPayload(
+        question_id="membership", handoff_id="offline", final_status="answer",
+        claims=claims), question="가상회사의 계약 중 해지된 계약이 존재하는가?")
+    assert answer.count("해지일: 2025-04-21") == 2
+    assert answer.count("사유: 상대방의 사업 철회") == 2
+    assert TERMINATION in answer and other_termination in answer
 
 
 def test_unverified_termination_detail_is_not_promoted_to_citation():
@@ -184,3 +190,20 @@ def test_ambiguous_related_corrections_are_never_labelled_original_candidates():
         assert any(ORIGINAL in note and OTHER in note for note in notes)
         assert all("원공시 후보" not in note for note in notes)
         assert any("연결이 미확정" in note for note in notes)
+
+
+def test_missing_original_conclusion_leads_an_identification_question_once():
+    payload = AnswerPayload(
+        question_id="root-query", handoff_id="offline", final_status="partial_answer",
+        claims=[AnswerClaim(
+            output_id="change", label="2025-03-10 정정 계약금액",
+            text="1,000 → 800", operator="correction_diff",
+        )], limitations=[
+            Limitation(code="source_scope_prevents_complete_lineage", detail="범위 제한"),
+            Limitation(code="source_scope_raw_absent", detail="원문 부재"),
+        ])
+    answer = TemplateComposer().compose(
+        payload, question="가상 공급계약의 원계약을 특정할 수 있는지 정정 이력을 설명해줘.")
+    assert answer.startswith("제공된 자료보다 앞선 원공시가 없어")
+    assert answer.count("이전 변경 이력은 확인할 수 없습니다") == 1
+    assert "원공시가 제공된 코퍼스보다 앞서 제출되어" not in answer

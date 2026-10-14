@@ -2255,6 +2255,7 @@ class EventTool(BaseTool):
         # list: 후보 각각을 timeline으로 열어 상태·연결을 나열
         seen_keys = {}
         emitted_ambiguous_terminations: set[str] = set()
+        emitted_termination_details: set[str] = set()
         for c in cands:
             tp = task.timepoints[-1]
             try:
@@ -2334,6 +2335,21 @@ class EventTool(BaseTool):
                         citations=self._termination_cites(
                             task.corp_code, receipt, tp)))
             used.extend(o.rcept_no for o in tl.observations)
+            for receipt in termination_receipts:
+                if receipt in emitted_termination_details:
+                    continue
+                emitted_termination_details.add(receipt)
+                for slot in ("해지계약명", "계약상대", "해지일자", "해지사유"):
+                    row, status = self.field_value(
+                        task.corp_code, receipt, slot, as_of=tp, trace=trace)
+                    if (row is None or status != "verified"
+                            or not str(row.value or "").strip()
+                            or str(row.value).strip() == "-"):
+                        continue
+                    claims.append(AnswerClaim(
+                        output_id=(f"{task.task_id}.termination-detail."
+                                   f"{receipt}.{slot}"),
+                        label=slot, text=row.value, citations=[_cite_field(row)]))
             if contract_listing:
                 meta = self._document_metadata(task.corp_code, c.rcept_no, tp)
                 if meta is not None:

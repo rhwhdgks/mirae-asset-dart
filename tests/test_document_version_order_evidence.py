@@ -4,7 +4,9 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from app.composer.template import _correction_history_table
+from app.composer.template import (
+    _correction_history_table, _document_versions_at_requested_dates,
+)
 from app.orchestrator.payload import AnswerClaim, ClaimCitation
 from app.tools.events import DocumentTool
 from src.canonical.lineage import LatestResolution
@@ -143,3 +145,47 @@ def test_contract_grouping_shows_verified_identity_without_renaming_it_original(
     assert "가상 도시 철도 공급" in table and "가상 발주처" in table
     assert ROOT in table and FIRST in table and LAST in table
     assert "원공시" not in table
+
+
+def _dated_payload():
+    old = "20240813900001"
+    new = "20240926900002"
+    def citation(rc):
+        return ClaimCitation(doc_id="periodic_" + rc, rcept_no=rc,
+                             locator="document", verification="source_roundtrip",
+                             excerpt_prompt_safe="가상 보고서 메타데이터")
+    return NS(limitations=[], claims=[
+        AnswerClaim(output_id="old", label="버전 유효 구간", state=old,
+                    text=f"{old} 버전은 20240813부터 다음 정정 접수일 20240926 전까지 유효",
+                    citations=[citation(old), citation(new)]),
+        AnswerClaim(output_id="new", label="버전 유효 구간", state=new,
+                    text=f"{new} 버전은 20240926부터 기준시점 20260619까지 논리적 최신본",
+                    citations=[citation(new)]),
+    ])
+
+
+def test_parallel_query_dates_select_their_own_proved_effective_versions():
+    answer = _document_versions_at_requested_dates(
+        _dated_payload(),
+        "가상회사의 2024년 반기보고서는 2024년 9월 25일과 26일 기준으로 어떤 버전이야?")
+    assert "| 2024-09-25 | 20240813900001 |" in answer
+    assert "| 2024-09-26 | 20240926900002 |" in answer
+
+
+@pytest.mark.parametrize("question", [
+    "가상회사의 보고서는 2024년 8월 12일과 13일 기준으로 어떤 버전이야?",
+    "가상회사의 보고서는 2026년 6월 19일과 20일 기준으로 어떤 버전이야?",
+    "가상회사의 원본과 2024년 9월 26일 정정본의 변경 이력은?",
+])
+def test_version_projection_does_not_invent_unproved_dates_or_query_roles(question):
+    assert _document_versions_at_requested_dates(_dated_payload(), question) is None
+
+
+def test_version_projection_requires_unique_intervals_and_own_document_evidence():
+    question = "가상회사의 보고서는 2024년 9월 25일과 26일 기준으로 어떤 버전이야?"
+    payload = _dated_payload()
+    payload.claims.append(payload.claims[0])
+    assert _document_versions_at_requested_dates(payload, question) is None
+    payload = _dated_payload()
+    payload.claims[0].citations = [payload.claims[0].citations[1]]
+    assert _document_versions_at_requested_dates(payload, question) is None
