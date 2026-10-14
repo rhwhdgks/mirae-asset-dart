@@ -1094,6 +1094,42 @@ class BaseTool:
             corp_code, as_of=as_of, rcept_no=rcept_no))
         return bool(rows) and rows[0].is_correction
 
+    def _document_metadata(self, corp_code: str, rcept_no: str, as_of: str):
+        """Resolve a filing coordinate without inferring its role from its ID."""
+        loader = getattr(self.rm, "_load_docs", None)
+        if callable(loader):
+            loader()
+            doc_id = getattr(self.rm, "_doc_id_by_rcept", {}).get(rcept_no)
+            meta = getattr(self.rm, "_documents", {}).get(doc_id)
+        else:
+            documents = getattr(self.rm, "documents", None)
+            meta = next((row for row in documents(
+                corp_code=corp_code, as_of=as_of)
+                if row.rcept_no == rcept_no), None) if callable(documents) else None
+        if (meta is None or meta.corp_code != corp_code
+                or meta.rcept_no != rcept_no
+                or not meta.rcept_dt or meta.rcept_dt > as_of):
+            return None
+        return meta
+
+    def _metadata_cites(self, corp_code: str, rcept_no: str, as_of: str):
+        """Cite the title, receipt date and correction role from documents."""
+        meta = self._document_metadata(corp_code, rcept_no, as_of)
+        if meta is None:
+            return []
+        kind = ("해지공시" if "해지" in (meta.form or "") else
+                "정정공시" if meta.is_correction else "공시")
+        return [ClaimCitation(
+            doc_id=meta.doc_id, rcept_no=meta.rcept_no, locator="document",
+            verification="source_roundtrip", report_name=meta.report_nm,
+            excerpt_prompt_safe=(
+                f"공시명: {meta.report_nm}\n접수일: {meta.rcept_dt}\n"
+                f"접수번호: {meta.rcept_no}\n공시구분: {kind}"))]
+
+    def _observation_cites(self, corp_code: str, rcept_no: str, as_of: str):
+        return (self._metadata_cites(corp_code, rcept_no, as_of)
+                or self._doc_cites(corp_code, rcept_no, as_of))
+
     def _doc_cites(self, corp_code, rcept_no, as_of):
         """문서를 인용할 대표 Field(계약상대 → 계약명 → 정정사유 → 첫 verified)."""
         for lb in ("계약상대", "계약명", "정정사유"):
@@ -1195,6 +1231,29 @@ class BaseTool:
 
 
 class EventTool(BaseTool):
+    def _termination_cites(self, corp_code: str, receipt: str, as_of: str):
+        """Bind a positive termination conclusion to that filing's contents.
+
+        A counterparty field alone does not show that a contract ended.  Keep
+        the verified name/date/reason cells together with the filing metadata;
+        never borrow those cells from an original or a sibling contract.
+        """
+        citations = self._metadata_cites(corp_code, receipt, as_of)
+        seen = {(c.doc_id, c.evidence_id, c.locator) for c in citations}
+        for slot in ("해지계약명", "해지일자", "해지사유", "해지금액", "계약상대"):
+            row, status = self.field_value(
+                corp_code, receipt, slot, as_of=as_of, trace=[])
+            if (status != "verified" or row is None
+                    or not str(row.value or "").strip()
+                    or str(row.value).strip() == "-"):
+                continue
+            citation = _cite_field(row)
+            key = (citation.doc_id, citation.evidence_id, citation.locator)
+            if key not in seen:
+                seen.add(key)
+                citations.append(citation)
+        return citations or self._doc_cites(corp_code, receipt, as_of)
+
     _ORIGIN_DISCRIMINATOR_GROUPS = (("시작일", "종료일"),)
 
     @staticmethod
@@ -1541,7 +1600,7 @@ class EventTool(BaseTool):
             used.extend(sorted(ambiguous_roots))
             lims.append(Limitation(
                 code="ambiguous_event_origin",
-                detail=(f"원공시 후보가 {len(ambiguous_roots)}건"
+                detail=(f"관련 공시 후보가 {len(ambiguous_roots)}건"
                         f"({', '.join(sorted(ambiguous_roots))})으로 사건 "
                         "identity가 확정되지 않음 — 해지·정정이 어느 "
                         "원계약에 대한 것인지 공시만으로 특정 불가"),
@@ -1618,7 +1677,7 @@ class EventTool(BaseTool):
                                f"{tp[:4]}-{tp[4:6]}-{tp[6:]} 기준 상태"),
                         state=None,
                         text=("개별 상태 미확정 — " + observation_text
-                              + "동일 조건의 원공시 후보가 복수이므로 "
+                              + "관련 공시 후보가 복수이므로 "
                                 "공시 관측만으로 이 계약의 법적 상태를 "
                                 "확정하지 않음"),
                         citations=self._doc_cites(
@@ -1643,7 +1702,7 @@ class EventTool(BaseTool):
                         state="termination_observed",
                         text=("해지 공시는 확인되지만 연결되는 원계약은 "
                               "공시만으로 특정할 수 없음"),
-                        citations=self._doc_cites(
+                        citations=self._termination_cites(
                             task.corp_code, observation.rcept_no, tp)))
                 # Explicitly requested termination fields remain useful as
                 # event-level observations.  Their labels and citations name
@@ -1687,7 +1746,7 @@ class EventTool(BaseTool):
                             text=(f"{observed_at[:4]}-{observed_at[4:6]}-"
                                   f"{observed_at[6:]} {kind} 공시 "
                                   f"(접수번호 {observation.rcept_no})"),
-                            citations=self._doc_cites(
+                            citations=self._observation_cites(
                                 task.corp_code, observation.rcept_no, tp)))
                         if observation.is_correction:
                             claims.extend(
@@ -1711,14 +1770,17 @@ class EventTool(BaseTool):
                     if bool(getattr(row, "is_termination", False))
                 ]
                 citations: list[ClaimCitation] = []
-                citation_receipts: set[str] = set()
+                citation_keys: set[tuple] = set()
                 evidence_rows = termination_rows or list(observations)
                 for observation in evidence_rows:
-                    for citation in self._doc_cites(
+                    cite_observation = (
+                        self._termination_cites if termination_rows
+                        else self._observation_cites)
+                    for citation in cite_observation(
                             task.corp_code, observation.rcept_no, tp):
-                        key = citation.rcept_no or citation.doc_id
-                        if key not in citation_receipts:
-                            citation_receipts.add(key)
+                        key = (citation.doc_id, citation.evidence_id, citation.locator)
+                        if key not in citation_keys:
+                            citation_keys.add(key)
                             citations.append(citation)
                 who = (task.selector.counterparty
                        or task.selector.contract_name or "")
@@ -1769,7 +1831,7 @@ class EventTool(BaseTool):
                         label=f"확인된 공시 이력 {observation.seq + 1}",
                         text=(f"{display_date} {kind} 공시 "
                               f"(접수번호 {observation.rcept_no})"),
-                        citations=self._doc_cites(
+                        citations=self._observation_cites(
                             task.corp_code, observation.rcept_no, tp)))
                 # The missing root prevents us from calling the first visible
                 # correction the *initial* contract, but it does not erase the
@@ -1798,7 +1860,7 @@ class EventTool(BaseTool):
                             f"{latest_day[:4]}-{latest_day[4:6]}-"
                             f"{latest_day[6:]} {latest_kind} 공시 "
                             f"(접수번호 {latest_observation.rcept_no})"),
-                        citations=self._doc_cites(
+                        citations=self._observation_cites(
                             task.corp_code, latest_observation.rcept_no, tp),
                     ))
                     termination_observed = any(
@@ -1830,10 +1892,10 @@ class EventTool(BaseTool):
                             label="기준시점 해지·종료 공시 관측 여부",
                             state="termination_observed",
                             text=(
-                                "해지·종료 공시는 확인되지만 원공시 후보가 "
+                                "해지·종료 공시는 확인되지만 관련 공시 후보가 "
                                 "복수이므로 개별 원계약의 법적 상태는 "
                                 "확정하지 않습니다."),
-                            citations=self._doc_cites(
+                            citations=self._termination_cites(
                                 task.corp_code, termination.rcept_no, tp),
                         ))
                     elif tl.state.status == "active" and not termination_observed:
@@ -1861,7 +1923,7 @@ class EventTool(BaseTool):
                             text=(
                                 "제공된 공시 자료에서 해지·종료 공시가 "
                                 "확인되어 공시상 종료된 상태입니다."),
-                            citations=self._doc_cites(
+                            citations=self._termination_cites(
                                 task.corp_code, termination.rcept_no, tp),
                         ))
                 used.extend(row.rcept_no for row in tl.observations)
@@ -1935,7 +1997,7 @@ class EventTool(BaseTool):
                     dt = f"{ob.observed_at[:4]}-{ob.observed_at[4:6]}-{ob.observed_at[6:]}"
                     claims.append(AnswerClaim(output_id=f"{task.task_id}.obs{ob.seq}@{tp}",
                                               label=f"이력 {ob.seq+1}", text=f"{dt} {kind} 공시 (접수번호 {ob.rcept_no})",
-                                              citations=self._doc_cites(task.corp_code, ob.rcept_no, tp)))
+                                              citations=self._observation_cites(task.corp_code, ob.rcept_no, tp)))
         # 상태·일반 필드는 시점별로 보존한다. 다만 뒤 시점 snapshot이 이미
         # 제시한 동일 정정행/관련 중요사항을 같은 원근거로 재방출한 경우만
         # 한 번으로 접어 장문 중복을 줄인다.
@@ -2023,7 +2085,10 @@ class EventTool(BaseTool):
         # 상태 판정은 이미 해지 관측을 우선해 고르고 있으므로,
         # 근거도 같은 관측을 따라가야 둘이 어긋나지 않는다.
         last = snapshot.state_rcept_no
-        cites = self._doc_cites(corp_code, last, tp) if last else []
+        cites = ((self._termination_cites(corp_code, last, tp)
+                  if snapshot.status == "terminated"
+                  else self._observation_cites(corp_code, last, tp))
+                 if last else [])
         slot_claims = []
         # A status answer needs the correction payload only when the correction
         # is the state-defining last observation.  A timeline answer is
@@ -2174,6 +2239,11 @@ class EventTool(BaseTool):
     def _list(self, task, cands, corp_name, trace):
         claims, lims, used = [], [], []
         requested_slots = list(task.requested_slots)
+        contract_listing = {"계약상대", "계약명"} <= set(requested_slots)
+        if contract_listing:
+            # Signing and filing are independent coordinates.  A receipt's
+            # date is never a fallback value for the actual contract date.
+            requested_slots.append("계약(수주)일자")
         if ({"해지금액", "해지사유"} <= set(requested_slots)
                 or {"해지금액", "해지 주요사유"} <= set(requested_slots)):
             # A compact comparison of multiple termination events should keep
@@ -2231,7 +2301,7 @@ class EventTool(BaseTool):
                 else:
                     public_state = None
                     txt = (f"{c.counterparty or ''} {c.contract_name or ''} — "
-                           "이 원공시에 직접 결속된 해지는 확인되지 않음"
+                           "이 식별 공시에 직접 결속된 해지는 확인되지 않음"
                            "(개별 상태 미확정)")
             citations = self._doc_cites(task.corp_code, c.rcept_no, tp)
             if state == "terminated":
@@ -2240,9 +2310,10 @@ class EventTool(BaseTool):
                 # coordinates so the public citation cannot make an original
                 # receipt appear to prove its own later termination.
                 for receipt in termination_receipts:
-                    for citation in self._doc_cites(
+                    for citation in self._termination_cites(
                             task.corp_code, receipt, tp):
-                        if not any(existing.rcept_no == citation.rcept_no
+                        if not any((existing.doc_id, existing.evidence_id, existing.locator)
+                                   == (citation.doc_id, citation.evidence_id, citation.locator)
                                    for existing in citations):
                             citations.insert(0, citation)
             claims.append(AnswerClaim(output_id=f"{task.task_id}.{c.rcept_no}", label=f"사건 {c.rcept_no}",
@@ -2260,9 +2331,16 @@ class EventTool(BaseTool):
                         text=(f"{c.counterparty or ''} {c.contract_name or ''} — "
                               "해지 공시는 확인되지만 연결되는 원계약은 "
                               "공시만으로 특정할 수 없음"),
-                        citations=self._doc_cites(
+                        citations=self._termination_cites(
                             task.corp_code, receipt, tp)))
             used.extend(o.rcept_no for o in tl.observations)
+            if contract_listing:
+                meta = self._document_metadata(task.corp_code, c.rcept_no, tp)
+                if meta is not None:
+                    claims.append(AnswerClaim(
+                        output_id=f"{task.task_id}.{c.rcept_no}.공시접수일",
+                        label=f"{c.rcept_no} 공시접수일", text=meta.rcept_dt,
+                        citations=self._metadata_cites(task.corp_code, c.rcept_no, tp)))
             if state == "terminated" and (not amb or candidate_is_termination):
                 etc, st_ = self.field_value(task.corp_code, c.rcept_no, "효력발생조건", as_of=tp, trace=trace)
                 if etc is not None and st_ == "verified" and etc.value:
@@ -2283,11 +2361,14 @@ class EventTool(BaseTool):
                         task.corp_code, c.rcept_no, "계약(수주)일자", as_of=tp, trace=trace)
                     signed_text = (f"계약일 {signed.value}, "
                                    if signed is not None and signed_status == "verified" else "")
+                    meta = self._document_metadata(task.corp_code, c.rcept_no, tp)
+                    receipt_day = meta.rcept_dt if meta is not None else c.rcept_dt
                     claims.append(AnswerClaim(
                         output_id=f"{task.task_id}.{c.rcept_no}.receipt",
-                        label=f"{c.rcept_no} 원공시",
-                        text=f"{signed_text}공시일 {c.rcept_no[:4]}-{c.rcept_no[4:6]}-{c.rcept_no[6:8]}, 접수번호 {c.rcept_no}",
-                        citations=([_cite_field(signed)] if signed_text else citations)))
+                        label=f"{c.rcept_no} 식별 공시",
+                        text=f"{signed_text}접수일 {receipt_day}, 접수번호 {c.rcept_no}",
+                        citations=([_cite_field(signed)] if signed_text else [])
+                        + self._observation_cites(task.corp_code, c.rcept_no, tp)))
                     continue
                 if s == "금액공개여부":
                     # An ambiguous termination cannot lend its disclosed
@@ -2377,16 +2458,33 @@ class EventTool(BaseTool):
                     f"{root} 체결 → {term} 해지"
                     for root, term in terminated_pairs)
                 if terminated_pairs else "")
+            summary_citations = []
+            summary_keys = set()
+            termination_citations = []
+            for claim in claims:
+                if not (claim.label.startswith("사건 ")
+                        or claim.label.startswith("해지 공시 ")):
+                    continue
+                for citation in claim.citations:
+                    if citation.doc_id not in summary_keys:
+                        summary_keys.add(citation.doc_id)
+                        summary_citations.extend(
+                            self._observation_cites(
+                                task.corp_code, citation.rcept_no, tp)
+                            if citation.rcept_no else [citation])
+                    if (claim.state in {"terminated", "termination_observed"}
+                            and citation not in termination_citations):
+                        termination_citations.append(citation)
             claims.insert(0, AnswerClaim(output_id=f"{task.task_id}.count", label="사건 건수",
                                          value_text=str(n_all), text=(
                                              f"조건에 맞는 사건 {n_all}건, 그중 해지 {n_term}건"
                                              + (f" (원본 identity 모호 {n_amb}건 포함 — 확정 연결 아님)" if n_amb else "")
                                              + existence_summary),
-                                         citations=claims[0].citations if claims else []))
+                                         citations=summary_citations))
             claims.insert(1, AnswerClaim(output_id=f"{task.task_id}.terminated_count", label="해지 공시 관측 건수",
                                          value_text=str(n_term), text=(f"해지 공시가 관측된 사건 {n_term}건"
                                               + (f" (원계약 특정 불가 {n_amb}건 포함)" if n_amb else "")),
-                                         citations=claims[1].citations if len(claims) > 1 else []))
+                                         citations=termination_citations or summary_citations))
             # When Stage1 resolves an issuer omitted from the question through
             # one unique corpus-backed role, state that issuer explicitly.
             # This prevents a general reader from mistaking the named
@@ -2416,7 +2514,7 @@ class EventTool(BaseTool):
                 code="ambiguous_event_origin",
                 detail=(
                     "해지 공시의 존재와 내용은 확인되지만 동일 조건의 "
-                    "원공시 후보가 복수라 canonical 원계약 계보는 미확정임; "
+                    "관련 공시 후보가 복수라 canonical 원계약 계보는 미확정임; "
                     "계약기간 일치는 후보 구분 정보일 뿐 후보 하나를 "
                     "해지 원계약으로 확정하지 않음"),
                 affected_doc_ids=notice_roots))

@@ -57,8 +57,8 @@ _REASON_KO = {
     "corpus_coverage_unavailable": (
         "요청하신 범위를 제공 자료가 담고 있지 않아 확인해 드릴 수 없습니다."),
     "pressure_resisted": "",
-    "ambiguous_event_identity": "후속 공시는 확인되지만 동일 상대방의 원공시가 복수여서 어느 원계약에 해당하는지는 공시만으로 특정할 수 없습니다.",
-    "ambiguous_event_origin": "후속 공시는 확인되지만 동일 상대방의 원공시가 복수여서 어느 원계약에 해당하는지는 공시만으로 특정할 수 없습니다.",
+    "ambiguous_event_identity": "관련 공시는 확인되지만 원계약과 후속 공시의 연결은 공시만으로 특정할 수 없습니다.",
+    "ambiguous_event_origin": "관련 공시는 확인되지만 원계약과 후속 공시의 연결은 공시만으로 특정할 수 없습니다.",
     "counterparty_not_reported_may_hide_match": "계약상대가 공개되지 않은 관련 후보 공시가 있어, 이 후보가 요청한 상대방의 계약인지 아닌지는 확인할 수 없습니다.",
     "intraday_order_unavailable": "공시의 정정 순서는 확인되지만 장중 접수시각이 없어 실제 제출 시각과 분·초 단위 선후는 확인할 수 없습니다.",
     "source_scope_prevents_complete_lineage": "제공된 자료보다 앞선 원공시가 없어 해당 공시의 최초 기재 내용과 그 이전 변경 이력은 확인할 수 없습니다.",
@@ -821,7 +821,7 @@ def _event_qualification_notes(limitations) -> list[str]:
             # 없습니다」를 이미 말했으므로, 후보 목록을 붙이는 자리에서는
             # 그 안전 문구를 지운다 — 둘 다 남기면 같은 말을 두 번 한다
             # (#86-14).
-            notes.append("원공시 후보 접수번호: " + ", ".join(origins) + ".")
+            notes.append("연결이 미확정인 관련 공시 접수번호: " + ", ".join(origins) + ".")
             superseded_by_candidates.add(code)
     if superseded_by_candidates:
         hidden = {
@@ -1035,7 +1035,7 @@ def _termination_membership_answer(payload, question: str | None) -> str | None:
     notes = _event_qualification_notes(payload.limitations)
     if ambiguous:
         notes = [note for note in notes
-                 if not note.startswith("후속 공시는 확인되지만")]
+                 if note != safe_limitation_message("ambiguous_event_origin")]
     if notes:
         _extend_public_qualifications(lines, notes)
     return "\n".join(lines)
@@ -1107,7 +1107,7 @@ def _ambiguous_termination_observation_answer(
     lines = [
         (f"{prefix}{date}에 {subject} 해지 공시는 확인됩니다."
          f"{_cite(final_state)}"),
-        ("다만 같은 상대방의 원공시가 복수라, 이 해지 공시가 어느 "
+        ("다만 관련 공시의 원계약 연결이 미확정이어서, 이 해지 공시가 어느 "
          "원계약에 해당하는지는 공시만으로 특정할 수 없습니다."),
     ]
 
@@ -1120,7 +1120,7 @@ def _ambiguous_termination_observation_answer(
         claim = by_label.get(label)
         if claim is not None and re.search(pattern, question):
             lines.append(TemplateComposer()._claim_line(claim))
-    lines.append("원공시 후보 접수번호: " + ", ".join(origins) + ".")
+    lines.append("연결이 미확정인 관련 공시 접수번호: " + ", ".join(origins) + ".")
     # Other limitations remain visible; the two ambiguity sentences above
     # already carry both the boundary and its candidate evidence.
     ambiguity_messages = set(render_safe_limitations(ambiguous))
@@ -1647,11 +1647,9 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
 
     Unlike ``_event_collection_table`` this never requires a termination
     amount/reason slot: every event with 계약상대·계약명 counts, whether or
-    not a later disclosure terminated it.  체결일 is not itself a disclosed
-    form field — the receipt number's own leading 8 digits are the DART
-    접수번호 date, so the column is labelled 체결일(접수일) to keep that
-    substitution explicit rather than inventing a field that was never
-    verified.
+    not a later disclosure terminated it.  The signing date is a verified
+    form field; the filing date is document metadata.  Never substitute one
+    for the other, including when the signing date is absent.
     """
 
     if (not question
@@ -1677,7 +1675,8 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
     slots: dict[str, dict[str, object]] = {}
     for claim in payload.claims:
         prefix, dot, suffix = claim.output_id.rpartition(".")
-        if dot and prefix in roots and suffix in ("계약상대", "계약명"):
+        if dot and prefix in roots and suffix in (
+                "계약상대", "계약명", "계약(수주)일자", "공시접수일"):
             slots.setdefault(prefix, {})[suffix] = claim
 
     # A large plain listing (79 real-world contract events) is unevenly
@@ -1686,7 +1685,7 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
     # make this route never fire on real data.  A row with both verified
     # slots is still shown for every other event; incomplete ones are named
     # in a count, not dropped without saying so.
-    rows: list[tuple[str, str, object, object]] = []
+    rows = []
     incomplete = 0
     for output_id, rcept_no in roots.items():
         row_slots = slots.get(output_id, {})
@@ -1695,7 +1694,10 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
         if counterparty is None or contract_name is None:
             incomplete += 1
             continue
-        rows.append((rcept_no, rcept_no[:8], counterparty, contract_name))
+        filing = row_slots.get("공시접수일")
+        date = filing.text if filing is not None else ""
+        rows.append((rcept_no, date or "", counterparty, contract_name,
+                     row_slots.get("계약(수주)일자"), filing))
     if len(rows) < 2:
         return None
     rows.sort(key=lambda row: (row[1], row[0]))
@@ -1711,16 +1713,24 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
         f"{subject}계약 공시는 {len(rows)}건입니다.")
     lines = [
         lead, "",
-        "| 계약상대 | 계약명 | 체결일(접수일) | 접수번호 |",
-        "|---|---|---|---|",
+        "| 계약상대 | 계약명 | 계약 체결일 | 식별 공시 접수일 | 근거 공시 |",
+        "|---|---|---|---|---|",
     ]
-    for rcept_no, date, counterparty, contract_name in rows:
+    for rcept_no, date, counterparty, contract_name, signed, filing in rows:
+        evidence_receipts = list(dict.fromkeys(
+            citation.rcept_no for claim in (
+                counterparty, contract_name, signed, filing) if claim is not None
+            for citation in claim.citations if citation.rcept_no))
+        signed_date = (signed.text or signed.value_text or ""
+                       if signed is not None else "")
         lines.append("| " + " | ".join((
             _markdown_cell(counterparty.text or counterparty.value_text or "-"),
             _markdown_cell(contract_name.text or contract_name.value_text or "-"),
-            _markdown_cell(_public_date(date)),
-            _markdown_cell(rcept_no),
+            _markdown_cell(signed_date or "확인되지 않음"),
+            _markdown_cell(_public_date(date) if date else "확인되지 않음"),
+            _markdown_cell(", ".join(dict.fromkeys((rcept_no, *evidence_receipts)))),
         )) + " |")
+    lines.append("\n접수일은 계약 체결일과 다릅니다. 계약 내용은 기준일까지 확인된 공시를 따르며, 근거 공시에 정정본이 포함될 수 있습니다.")
     notes = render_safe_limitations(payload.limitations)
     if notes:
         lines.append("")
@@ -4503,7 +4513,7 @@ class TemplateComposer:
                 ))
                 if len(origins) >= 2:
                     notes.append(
-                        "원공시 후보 접수번호: " + ", ".join(origins) + ".")
+                        "연결이 미확정인 관련 공시 접수번호: " + ", ".join(origins) + ".")
                     superseded_by_candidates.add(code)
         if superseded_by_candidates:
             hidden = {
