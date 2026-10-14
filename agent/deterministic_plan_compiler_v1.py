@@ -5108,6 +5108,7 @@ def _lifecycle_item_mode(source: Any, typed: LifecycleCompositeResolution) -> st
         return "attributes" if set(kinds).issubset(available) else None
     state_requested = any(re.search(r"상태|유효|살아|최종|해지|종료", surface)
                           for surface in source.output.field_surfaces)
+    state_requested = state_requested or bool(_lifecycle_status_requested_slots(source))
     if state_requested and typed.status_timepoints:
         return "status"
     correction_requested = any(re.search(r"정정|전후|흐름|변경", surface)
@@ -5130,6 +5131,8 @@ def _lifecycle_status_requested_slots(source: Any) -> list[str]:
 
     compact = [re.sub(r"\s+", "", value)
                for value in source.output.field_surfaces]
+    from agent.stage1_v1_lifecycle_composite import is_literal_termination_filing_observation
+    generic_observation = is_literal_termination_filing_observation(source)
     # Naming the *filing* is what makes this an observation role.  The
     # interrogative that carried the request ("확인되는지") often stays in the
     # question and never reaches the field surface, which arrives as the bare
@@ -5138,7 +5141,7 @@ def _lifecycle_status_requested_slots(source: Any) -> list[str]:
     # validity claim the corpus cannot support.  An attribute request such as
     # ``해지 공시의 계약금액`` never arrives here: attribute mode is selected
     # first in ``_lifecycle_item_mode``.
-    if any(
+    if generic_observation or any(
             "공시" in value
             and any(token in value for token in ("해지", "종료"))
             for value in compact):

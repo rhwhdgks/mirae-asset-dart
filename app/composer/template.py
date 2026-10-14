@@ -57,10 +57,11 @@ _REASON_KO = {
     "corpus_coverage_unavailable": (
         "요청하신 범위를 제공 자료가 담고 있지 않아 확인해 드릴 수 없습니다."),
     "pressure_resisted": "",
-    "ambiguous_event_identity": "후속 공시는 확인되지만 동일 상대방의 원공시가 복수여서 어느 원계약에 해당하는지는 공시만으로 특정할 수 없습니다.",
-    "ambiguous_event_origin": "후속 공시는 확인되지만 동일 상대방의 원공시가 복수여서 어느 원계약에 해당하는지는 공시만으로 특정할 수 없습니다.",
+    "ambiguous_event_identity": "관련 공시는 확인되지만 원계약과 후속 공시의 연결은 공시만으로 특정할 수 없습니다.",
+    "ambiguous_event_origin": "관련 공시는 확인되지만 원계약과 후속 공시의 연결은 공시만으로 특정할 수 없습니다.",
     "counterparty_not_reported_may_hide_match": "계약상대가 공개되지 않은 관련 후보 공시가 있어, 이 후보가 요청한 상대방의 계약인지 아닌지는 확인할 수 없습니다.",
     "intraday_order_unavailable": "공시의 정정 순서는 확인되지만 장중 접수시각이 없어 실제 제출 시각과 분·초 단위 선후는 확인할 수 없습니다.",
+    "document_order_unavailable": "최신본은 확인되지만 중간 공시 전체의 선후 관계가 확정되지 않아 순서를 추정하지 않았습니다.",
     "source_scope_prevents_complete_lineage": "제공된 자료보다 앞선 원공시가 없어 해당 공시의 최초 기재 내용과 그 이전 변경 이력은 확인할 수 없습니다.",
     "source_excerpt_boundary_unavailable": "검증된 원문 값은 있으나 공개 길이 안에 완결된 문장이나 항목 경계가 없어 내용을 중간에서 잘라 제시하지 않았습니다.",
     "comparison_explanation_excerpt_unavailable": "두 금액의 차이는 계산했지만 산정 근거 원문을 공개 길이 안에서 완결된 문장으로 제시할 수 없어 원인을 임의로 요약하지 않았습니다.",
@@ -821,7 +822,7 @@ def _event_qualification_notes(limitations) -> list[str]:
             # 없습니다」를 이미 말했으므로, 후보 목록을 붙이는 자리에서는
             # 그 안전 문구를 지운다 — 둘 다 남기면 같은 말을 두 번 한다
             # (#86-14).
-            notes.append("원공시 후보 접수번호: " + ", ".join(origins) + ".")
+            notes.append("연결이 미확정인 관련 공시 접수번호: " + ", ".join(origins) + ".")
             superseded_by_candidates.add(code)
     if superseded_by_candidates:
         hidden = {
@@ -875,6 +876,28 @@ def _event_state_table(states) -> str:
             f"| {_markdown_cell(_public_date(date))} | "
             f"{_markdown_cell(state)} | {_markdown_cell(evidence or '-')} |"
         )
+    return "\n".join(lines)
+
+
+def _bounded_termination_observation_answer(payload) -> str | None:
+    """Keep each observation date, including identical negative findings."""
+    claims = payload.claims
+    if (not claims
+            or not all(claim.state in {"no_termination_observed", "termination_observed"}
+                       and not claim.operator and not claim.derived_from
+                       and _event_state_time_key(claim) for claim in claims)
+            or not any(claim.state == "no_termination_observed" for claim in claims)):
+        return None
+    table = _event_state_table(claims)
+    if not table:
+        lines = [TemplateComposer()._claim_line(claim) for claim in claims]
+    else:
+        lines = [table, "",
+                 "이는 제공된 공시 자료에서 확인한 결과이며, 해지·종료 공시가 확인되지 "
+                 "않았다는 사실만으로 계약의 법적 유효성을 판단한 것은 아닙니다."]
+    notes = _event_qualification_notes(payload.limitations)
+    if notes:
+        _extend_public_qualifications(lines, notes)
     return "\n".join(lines)
 
 
@@ -1007,6 +1030,44 @@ def _termination_membership_answer(payload, question: str | None) -> str | None:
             return None
         return f"제공된 자료에서는 해지 공시가 확인되는 계약을 찾지 못했습니다.{_cite(count)}"
 
+    termination_details = {}
+    for claim in payload.claims:
+        if ".termination-detail." not in claim.output_id:
+            continue
+        for citation in claim.citations:
+            if citation.rcept_no:
+                termination_details.setdefault(citation.rcept_no, {})[claim.label] = claim
+
+    def member_lines(member):
+        bound = [
+            (receipt, termination_details[receipt])
+            for receipt in dict.fromkeys(c.rcept_no for c in member.citations)
+            if receipt in termination_details
+        ]
+        if not bound:
+            return [f"- {_display_text(member.text or member.label)}{_cite(member)}"]
+        result = []
+        for receipt, details in bound:
+            name = details.get("해지계약명")
+            counterparty = details.get("계약상대")
+            date = details.get("해지일자")
+            reason = details.get("해지사유")
+            # The positive observation belongs to the termination receipt,
+            # not to an ambiguous candidate's name/counterparty snapshot.
+            subject = " · ".join(
+                _display_text(claim.text) for claim in (counterparty, name)
+                if claim is not None and claim.text)
+            if not subject:
+                subject = _display_text(member.text or member.label)
+            detail_text = "; ".join(
+                f"{label}: {_display_text(claim.text)}"
+                for label, claim in (("해지일", date), ("사유", reason))
+                if claim is not None and claim.text)
+            result.append(f"- {subject} — 해지 공시 {receipt} 확인"
+                          + (f". {detail_text}" if detail_text else "")
+                          + _cite(member))
+        return result
+
     lines: list[str] = []
     if confirmed:
         lines.append(
@@ -1014,20 +1075,14 @@ def _termination_membership_answer(payload, question: str | None) -> str | None:
             f"{len(confirmed)}건입니다."
         )
         lines.append("원계약까지 확인된 계약:")
-        lines.extend(
-            f"- {_display_text(claim.text or claim.label)}{_cite(claim)}"
-            for claim in confirmed
-        )
+        lines.extend(line for claim in confirmed for line in member_lines(claim))
     if ambiguous:
         lines.append(
             ("별도로 해지 공시는 확인되지만 원계약을 특정할 수 없는 건은 "
              f"{len(ambiguous)}건입니다.")
         )
         lines.append("원계약이 확정되지 않은 해지 공시:")
-        lines.extend(
-            f"- {_display_text(claim.text or claim.label)}{_cite(claim)}"
-            for claim in ambiguous
-        )
+        lines.extend(line for claim in ambiguous for line in member_lines(claim))
 
     # The answer above already explains the ambiguous state.  Keep the
     # candidate receipts, which are the audit evidence for that limitation,
@@ -1035,7 +1090,7 @@ def _termination_membership_answer(payload, question: str | None) -> str | None:
     notes = _event_qualification_notes(payload.limitations)
     if ambiguous:
         notes = [note for note in notes
-                 if not note.startswith("후속 공시는 확인되지만")]
+                 if note != safe_limitation_message("ambiguous_event_origin")]
     if notes:
         _extend_public_qualifications(lines, notes)
     return "\n".join(lines)
@@ -1107,7 +1162,7 @@ def _ambiguous_termination_observation_answer(
     lines = [
         (f"{prefix}{date}에 {subject} 해지 공시는 확인됩니다."
          f"{_cite(final_state)}"),
-        ("다만 같은 상대방의 원공시가 복수라, 이 해지 공시가 어느 "
+        ("다만 관련 공시의 원계약 연결이 미확정이어서, 이 해지 공시가 어느 "
          "원계약에 해당하는지는 공시만으로 특정할 수 없습니다."),
     ]
 
@@ -1120,7 +1175,7 @@ def _ambiguous_termination_observation_answer(
         claim = by_label.get(label)
         if claim is not None and re.search(pattern, question):
             lines.append(TemplateComposer()._claim_line(claim))
-    lines.append("원공시 후보 접수번호: " + ", ".join(origins) + ".")
+    lines.append("연결이 미확정인 관련 공시 접수번호: " + ", ".join(origins) + ".")
     # Other limitations remain visible; the two ambiguity sentences above
     # already carry both the boundary and its candidate evidence.
     ambiguity_messages = set(render_safe_limitations(ambiguous))
@@ -1647,11 +1702,9 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
 
     Unlike ``_event_collection_table`` this never requires a termination
     amount/reason slot: every event with 계약상대·계약명 counts, whether or
-    not a later disclosure terminated it.  체결일 is not itself a disclosed
-    form field — the receipt number's own leading 8 digits are the DART
-    접수번호 date, so the column is labelled 체결일(접수일) to keep that
-    substitution explicit rather than inventing a field that was never
-    verified.
+    not a later disclosure terminated it.  The signing date is a verified
+    form field; the filing date is document metadata.  Never substitute one
+    for the other, including when the signing date is absent.
     """
 
     if (not question
@@ -1677,7 +1730,8 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
     slots: dict[str, dict[str, object]] = {}
     for claim in payload.claims:
         prefix, dot, suffix = claim.output_id.rpartition(".")
-        if dot and prefix in roots and suffix in ("계약상대", "계약명"):
+        if dot and prefix in roots and suffix in (
+                "계약상대", "계약명", "계약(수주)일자", "공시접수일"):
             slots.setdefault(prefix, {})[suffix] = claim
 
     # A large plain listing (79 real-world contract events) is unevenly
@@ -1686,7 +1740,7 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
     # make this route never fire on real data.  A row with both verified
     # slots is still shown for every other event; incomplete ones are named
     # in a count, not dropped without saying so.
-    rows: list[tuple[str, str, object, object]] = []
+    rows = []
     incomplete = 0
     for output_id, rcept_no in roots.items():
         row_slots = slots.get(output_id, {})
@@ -1695,7 +1749,10 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
         if counterparty is None or contract_name is None:
             incomplete += 1
             continue
-        rows.append((rcept_no, rcept_no[:8], counterparty, contract_name))
+        filing = row_slots.get("공시접수일")
+        date = filing.text if filing is not None else ""
+        rows.append((rcept_no, date or "", counterparty, contract_name,
+                     row_slots.get("계약(수주)일자"), filing))
     if len(rows) < 2:
         return None
     rows.sort(key=lambda row: (row[1], row[0]))
@@ -1711,19 +1768,83 @@ def _contract_event_listing_table(payload, question: str | None) -> str | None:
         f"{subject}계약 공시는 {len(rows)}건입니다.")
     lines = [
         lead, "",
-        "| 계약상대 | 계약명 | 체결일(접수일) | 접수번호 |",
-        "|---|---|---|---|",
+        "| 계약상대 | 계약명 | 계약 체결일 | 식별 공시 접수일 | 근거 공시 |",
+        "|---|---|---|---|---|",
     ]
-    for rcept_no, date, counterparty, contract_name in rows:
+    for rcept_no, date, counterparty, contract_name, signed, filing in rows:
+        evidence_receipts = list(dict.fromkeys(
+            citation.rcept_no for claim in (
+                counterparty, contract_name, signed, filing) if claim is not None
+            for citation in claim.citations if citation.rcept_no))
+        signed_date = (signed.text or signed.value_text or ""
+                       if signed is not None else "")
         lines.append("| " + " | ".join((
             _markdown_cell(counterparty.text or counterparty.value_text or "-"),
             _markdown_cell(contract_name.text or contract_name.value_text or "-"),
-            _markdown_cell(_public_date(date)),
-            _markdown_cell(rcept_no),
+            _markdown_cell(signed_date or "확인되지 않음"),
+            _markdown_cell(_public_date(date) if date else "확인되지 않음"),
+            _markdown_cell(", ".join(dict.fromkeys((rcept_no, *evidence_receipts)))),
         )) + " |")
+    lines.append("\n접수일은 계약 체결일과 다릅니다. 계약 내용은 기준일까지 확인된 공시를 따르며, 근거 공시에 정정본이 포함될 수 있습니다.")
     notes = render_safe_limitations(payload.limitations)
     if notes:
         lines.append("")
+        _extend_public_qualifications(lines, notes)
+    return "\n".join(lines)
+
+
+def _document_versions_at_requested_dates(payload, question: str | None) -> str | None:
+    """Project already proved version intervals onto explicit query dates.
+
+    This does not resolve a new document or infer a relation.  The tool must
+    already have emitted uniquely ordered, citation-bound effective intervals.
+    The shared date parser only recovers the user's explicit parallel dates.
+    Missing/overlapping intervals or dates beyond their proved cutoff decline
+    the projection rather than silently returning the corpus-end latest file.
+    """
+    if (not question or "기준" not in question
+            or not re.search(r"버전|유효|원본|정정본", question)):
+        return None
+    from agent.date_surface import question_date_surfaces
+    days = sorted({
+        f"{year:04d}{month:02d}{day:02d}"
+        for year, month, day in question_date_surfaces(question)
+        if month is not None and day is not None})
+    if len(days) < 2:
+        return None
+    intervals = []
+    for claim in payload.claims:
+        if claim.label != "버전 유효 구간" or not claim.state or not claim.citations:
+            continue
+        match = re.fullmatch(
+            r"(?P<receipt>\d{14}) 버전은 (?P<start>\d{8})부터 "
+            r"(?:다음 정정 접수일 (?P<next>\d{8}) 전까지 유효|"
+            r"기준시점 (?P<cutoff>\d{8})까지 논리적 최신본)", claim.text or "")
+        if match is None or match.group("receipt") != claim.state:
+            continue
+        # The selected member's own filing metadata must be present; a
+        # neighbouring member's date/field citation cannot prove this bound.
+        if not any(c.rcept_no == claim.state and c.locator == "document"
+                   and c.verification == "source_roundtrip" for c in claim.citations):
+            continue
+        intervals.append((match.groupdict(), claim))
+    selected = []
+    for day in days:
+        candidates = [(interval, claim) for interval, claim in intervals
+                      if interval["start"] <= day and (
+                          day < interval["next"] if interval["next"] is not None
+                          else day <= interval["cutoff"])]
+        if len(candidates) != 1:
+            return None
+        interval, claim = candidates[0]
+        selected.append((day, interval["receipt"], claim))
+    lines = ["기준일별로 확인되는 보고서 버전은 다음과 같습니다.", "",
+             "| 기준일 | 선택된 버전 | 근거 |", "|---|---|---|"]
+    for day, receipt, claim in selected:
+        source = _cite(claim).strip().removeprefix("(근거: ").removesuffix(")")
+        lines.append(f"| {_public_date(day)} | {receipt} | {source} |")
+    notes = render_safe_limitations(payload.limitations)
+    if notes:
         _extend_public_qualifications(lines, notes)
     return "\n".join(lines)
 
@@ -1924,6 +2045,12 @@ def _correction_history_table(
         for match in [re.search(r"계약 식별 접수번호 (\d{14})", claim.label or "")]
         if match
     ))
+    contract_identities = {
+        match.group(1): claim
+        for claim in claims
+        for match in [re.fullmatch(r"계약 식별 공시 (\d{14})", claim.label or "")]
+        if match is not None and claim.text and claim.citations
+    }
     # 바로 위에 「공시 정정 이력: A → B → …」 줄이 있다. 같은 말을 두 번
     # 머리글로 쓰면 무엇이 다른 목록인지 알 수 없다.
     lines = ["정정별 변경 내용:", ""]
@@ -1946,7 +2073,16 @@ def _correction_history_table(
         evidence = citation.strip().removeprefix("(근거: ").removesuffix(")") or "-"
         cells = [date, field, change, evidence]
         if contract_receipts:
-            cells.insert(0, contract or "확인되지 않음")
+            identity = contract_identities.get(contract)
+            contract_cell = (
+                f"{identity.text} (식별 공시 {contract})"
+                if identity is not None else contract or "확인되지 않음")
+            if identity is not None:
+                identity_evidence = _cite(identity).strip().removeprefix(
+                    "(근거: ").removesuffix(")")
+                if identity_evidence and identity_evidence not in cells[-1]:
+                    cells[-1] += "; " + identity_evidence
+            cells.insert(0, contract_cell)
         lines.append("| " + " | ".join(
             _markdown_cell(cell) for cell in cells) + " |")
     return "\n".join(lines)
@@ -2924,6 +3060,14 @@ def _drop_repeated_lines(answer: str) -> str:
                 and re.search(r": [^:()\n]+ 확인 \(근거:", stripped)):
             kept.append(line)
             continue
+        # Two independent terminations may have identical parties, names,
+        # dates and reasons. Their explicit filing identities distinguish
+        # the list members; stripping the prefix at ``해지일:`` would erase
+        # one contract while leaving the reported count unchanged.
+        if (stripped.startswith("- ")
+                and re.search(r"— 해지 공시 \d{14} 확인", stripped)):
+            kept.append(line)
+            continue
         # 인용을 먼저 뗀다. 떼지 않으면 ``(근거: 접수번호 …)`` 안의 첫
         # ``": "`` 에서 잘려 인용문이 본문으로 잡히고, 같은 문서를 인용한
         # 서로 다른 줄이 중복으로 판정된다.
@@ -3248,6 +3392,12 @@ class TemplateComposer:
         termination_membership = _termination_membership_answer(payload, question)
         if termination_membership is not None:
             return termination_membership
+        dated_versions = _document_versions_at_requested_dates(payload, question)
+        if dated_versions is not None:
+            return dated_versions
+        bounded_observations = _bounded_termination_observation_answer(payload)
+        if bounded_observations is not None:
+            return bounded_observations
         extrema = [c for c in payload.claims if c.state == "argmax_summary"]
         if len(extrema) == 1 and extrema[0].value_text:
             summary = extrema[0]
@@ -3617,12 +3767,12 @@ class TemplateComposer:
         """Current event status followed by one non-duplicated change table."""
 
         compact_question = re.sub(r"\s+", "", question or "")
-        complete_lineage_request = (
-            any(token in compact_question for token in ("최초", "원공시"))
-            and "이력" in compact_question
-            and any(token in compact_question for token in ("전체", "모두"))
+        original_identification_request = (
+            any(token in compact_question for token in ("최초", "원공시", "원계약"))
+            and any(token in compact_question for token in (
+                "이력", "특정", "찾", "확인", "설명"))
         )
-        source_scope_limited = complete_lineage_request and any(
+        source_scope_limited = original_identification_request and any(
             limitation.code.split(":", 1)[0]
             == "source_scope_prevents_complete_lineage"
             for limitation in p.limitations
@@ -3896,6 +4046,16 @@ class TemplateComposer:
             lines.append(narrative_summary)
 
         notes = self._public_notes(p, question=question)
+        if source_scope_limited:
+            # The missing-original conclusion already leads the answer.
+            # Preserve other identity/data limits but do not repeat this
+            # boundary under a second, slightly different safe message.
+            source_scope_messages = set(render_safe_limitations([
+                limitation for limitation in p.limitations
+                if limitation.code.split(":", 1)[0] in {
+                    "source_scope_prevents_complete_lineage", "source_scope_raw_absent"}
+            ]))
+            notes = [note for note in notes if note not in source_scope_messages]
         # A document correction query can carry an upstream event-identity
         # diagnostic even though its exact original-to-correction document
         # chain is resolved. Without at least two public original candidates
@@ -4503,7 +4663,7 @@ class TemplateComposer:
                 ))
                 if len(origins) >= 2:
                     notes.append(
-                        "원공시 후보 접수번호: " + ", ".join(origins) + ".")
+                        "연결이 미확정인 관련 공시 접수번호: " + ", ".join(origins) + ".")
                     superseded_by_candidates.add(code)
         if superseded_by_candidates:
             hidden = {
