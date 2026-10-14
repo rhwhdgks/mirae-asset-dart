@@ -157,6 +157,11 @@ def _bare_concept_surface(surface: str) -> str:
     parenthesized = re.fullmatch(r"(?:capex|캐펙스)\s*\((.+)\)", value, re.IGNORECASE)
     if parenthesized is not None:
         value = parenthesized.group(1).strip()
+    ancestor = re.fullmatch(r"[A-Za-z0-9가-힣&+]+\s*중(?:에서)?\s*(.+)", value)
+    if ancestor is not None and resolve_metric_concept(ancestor.group(1)) is not None:
+        # The ancestor is bound separately to a verified source account path;
+        # it is not part of the financial concept's name.
+        value = ancestor.group(1).strip()
     return value or (surface or "").strip()
 
 
@@ -810,12 +815,19 @@ class FinancialResolutionBackend:
             if as_of is None:
                 return None          # 기준시점을 못 읽으면 확정하지 않는다 (cutoff 로 대체 금지)
             operand_account_paths = None
+            scalar_account_path = None
             if operand_views is not None:
                 operand_account_paths = _question_grounded_view_account_paths(
                     rows[0], item=item, question=question,
                     companies=self.companies, as_of=as_of)
                 if operand_account_paths is None:
                     return None
+            elif len(rows) == 1 and len(_question_account_ancestors(item, question)) == 1:
+                paths = _question_grounded_view_account_paths(
+                    rows[0], item=item, question=question,
+                    companies=self.companies, as_of=as_of)
+                if paths is not None:
+                    scalar_account_path = paths[0 if self.view == "as_filed" else 1]
             if ratio_presentation is not None:
                 payload = _ratio_payload_for(
                     rows[0], rows[1], as_of=as_of, view=self.view,
@@ -825,15 +837,9 @@ class FinancialResolutionBackend:
                     rows, as_of=as_of, view=self.view,
                     question=question, operation=item.operation,
                     direction=direction,
-                    operand_as_of=(
-                        _period_bound_operand_as_of(
-                            rows, companies=self.companies,
-                            corpus_cutoff=self.corpus_cutoff)
-                        or _instant_fiscal_year_end_operand_as_of(
-                            rows, companies=self.companies,
-                            corpus_cutoff=self.corpus_cutoff,
-                            operand_views=operand_views)
-                    ),
+                    # The accounting period stays on each coordinate. Its
+                    # filing date must not replace the resolved observation
+                    # cutoff: later disclosures may restate that same period.
                     field_surfaces=tuple(item.output.field_surfaces),
                     parallel_change_operator=_parallel_annual_change_operator(
                         source_intent, index - 1),
@@ -856,6 +862,13 @@ class FinancialResolutionBackend:
             )
             applied_defaults = _applied_defaults(
                 rows, alias_provenance=alias_provenance)
+            if scalar_account_path is not None:
+                applied_defaults.append({
+                    "policy": "question_grounded_account_path",
+                    "basis": "unique account ancestor at the requested filing view and cutoff",
+                    "value": scalar_account_path,
+                    "evidence_refs": ["question:financial-account-ancestor"],
+                })
             if operand_account_paths is not None:
                 applied_defaults.append({
                     "policy": "question_grounded_view_account_paths",
@@ -1032,6 +1045,14 @@ def _question_grounded_view_pair(
     return "as_filed", "restated"
 
 
+def _question_account_ancestors(item: Any, question: str) -> tuple[str, ...]:
+    target = re.escape(re.split(r"\s*중(?:에서)?\s*", item.target.surface.strip())[-1])
+    return tuple(dict.fromkeys(
+        match.group("ancestor").strip()
+        for match in re.finditer(
+            rf"(?P<ancestor>[A-Za-z0-9가-힣&+]+)\s*중(?:에서)?\s*{target}", question)))
+
+
 def _question_grounded_view_account_paths(
         row: FinancialCoordinate, *, item: Any, question: str,
         companies: Any, as_of: str,
@@ -1046,23 +1067,28 @@ def _question_grounded_view_account_paths(
 
     if not callable(getattr(companies, "facts", None)):
         return None
-    target = re.escape(item.target.surface.strip())
-    ancestors = list(dict.fromkeys(
-        match.group("ancestor").strip()
-        for match in re.finditer(
-            rf"(?P<ancestor>[A-Za-z0-9가-힣&+]+)\s*중(?:에서)?\s*{target}",
-            question)
-    ))
-    if len(ancestors) != 1:
+    ancestors = _question_account_ancestors(item, question)
+    if len(ancestors) > 1:
         return None
-    ancestor_key = normalize_surface_key(ancestors[0])
+    ancestor_key = normalize_surface_key(ancestors[0]) if ancestors else None
+
+    def matches_ancestor(path: str) -> bool:
+        if ancestor_key is None:
+            return True
+        # Match an account heading, not a substring: 유동자산 must not bind
+        # 비유동자산. Ignore only the source's heading number/punctuation.
+        return any(normalize_surface_key(re.sub(
+            r"^[\s0-9IVXivxⅠ-Ⅻⅰ-ⅻ.()]+", "", part)) == ancestor_key
+            for part in path.split(">")[:-1])
+
     candidates = [
         fact for fact in companies.facts(
             row.corp_code, as_of=as_of, concept=row.concept.value,
             scope=row.scope, statement=row.statement,
             period_end=row.period_end.isoformat(), cumulative=row.cumulative)
         if isinstance(getattr(fact, "account_path", None), str)
-        and ancestor_key in normalize_surface_key(fact.account_path)
+        and matches_ancestor(fact.account_path)
+        and getattr(fact, "period_type", None) == row.period_type
         and getattr(fact, "period_start", None) == (
             row.period_start.isoformat() if row.period_start is not None else None)
     ]
@@ -1078,154 +1104,6 @@ def _question_grounded_view_account_paths(
             return None
         paths.append(next(iter(selected_paths)))
     return paths[0], paths[1]
-
-
-def _period_bound_operand_as_of(
-        rows: "tuple[FinancialCoordinate, ...]", *, companies: Any,
-        corpus_cutoff: str,
-        ) -> "tuple[str, ...] | None":
-    """Bind each same-company period operand to its own periodic filing.
-
-    A later annual or interim report repeats earlier periods as comparison
-    columns.  A corpus-end ``restated`` lookup would therefore cite both
-    operands from the later document, even when the question asks for two
-    separately filed periods.  For a same-company period relation, cap each
-    operand at the latest filing whose *base period* equals that operand.
-    Corrections to that exact report remain visible, while a following
-    period's comparison column cannot replace its source document.
-    """
-
-    if (len(rows) != 2 or rows[0].corp_code != rows[1].corp_code
-            or rows[0].scope != rows[1].scope
-            or rows[0].period_end == rows[1].period_end
-            or not callable(getattr(companies, "documents", None))):
-        return None
-    cutoffs: list[str] = []
-    for row in rows:
-        candidates = [
-            document.rcept_dt
-            for document in companies.documents(
-                as_of=corpus_cutoff, corp_code=row.corp_code,
-                doc_group="periodic")
-            if getattr(document, "base_year", None) == row.period_end.year
-            and getattr(document, "base_month", None) == row.period_end.month
-        ]
-        if not candidates:
-            return None
-        cutoffs.append(max(candidates))
-    if not callable(getattr(companies, "facts", None)):
-        return tuple(cutoffs)
-    for row, cutoff in zip(rows, cutoffs, strict=True):
-        # A company that listed recently files its first annual report with
-        # the prior year only as a comparison column.  Pinning that operand to
-        # its own filing then proves nothing, and the request closes as if the
-        # figure did not exist.  Fall back to the ordinary corpus-end restated
-        # lookup for *both* operands so the answer cites the report that does
-        # carry the value instead of denying it.
-        available = any(
-            getattr(fact, "period_end", None) == row.period_end.isoformat()
-            and getattr(fact, "scope", None) == row.scope
-            for fact in companies.facts(
-                row.corp_code, as_of=cutoff, concept=row.concept.value)
-        )
-        if not available:
-            return None
-    return tuple(cutoffs)
-
-
-def _instant_fiscal_year_end_operand_as_of(
-        rows: "tuple[FinancialCoordinate, ...]", *, companies: Any,
-        corpus_cutoff: str, operand_views: "tuple[str, ...] | None" = None,
-        ) -> "tuple[str | None, ...] | None":
-    """Per-coordinate fiscal-year-end pin for a point-in-time (``instant``) row.
-
-    이슈 #149 — 「KB금융의 2025년 연결 기준 당기법인세부채는 얼마인가?」는
-    ``period_end=2025-12-31`` 자체는 이미 맞게 좁혔지만, 그 좌표의 ``as_of``
-    는 여전히 ``corpus_cutoff`` 였다. 2026 1분기 분기보고서도 「전기말」
-    비교열로 2025-12-31 시점 사실을 담고 있어, 그 문서가 FY2025 사업보고서
-    보다 나중에 제출됐다는 이유만으로 「최신(``restated``)」인용이 그
-    분기보고서를 골랐다 — 사용자는 「2025년」을 물었지 「2026년 1분기」를
-    묻지 않았고, 그 비교열이 정정으로 갱신되지 않았다고 단정할 근거도 없다.
-
-    `_period_bound_operand_as_of` 가 **서로 다른 기간의 짝**에 하는 것과
-    같은 방식으로, 시점 개념의 **회계연도말(12월 31일)** 좌표는 그 회계연도
-    자체의 사업보고서 계열(과 그 정정)로 문서 검색을 좁힌다. 분기말 좌표
-    (``period_end.month != 12``)나 duration 개념은 손대지 않는다 — 분기
-    표현은 종전대로 두라는 요구사항이고, 기간이 다른 duration 짝은 이미
-    `_period_bound_operand_as_of` 의 몫이다.
-
-    좌표별로 독립적으로 판단한다 — 연결·별도 같은 시점을 비교하는 질문
-    (DEV-FDR-006 류)에서도 각 좌표가 자기 scope 안에서 자기 연도 사업
-    보고서로 좁혀야 한다. 그 연도의 사업보고서 계열 자체가 없거나(상장
-    초기), 그 계열의 어느 문서에도 이 좌표의 사실이 없으면 그 좌표는
-    손대지 않고 ``None`` 을 돌려준다.
-
-    **문서 날짜가 아니라 그 문서가 실제로 낸 사실로 최댓값을 고른다.**
-    같은 회계연도의 정정이 코퍼스 컷오프 바로 앞에서 접수됐지만 사실
-    추출이 아직 안 된 경우(예: KB금융 FY2025 20260619000667,
-    ``newer_annual_fact_extract_unsupported``)가 실측에 있다. `documents()`
-    날짜만으로 최댓값을 고르면 그 미추출 정정의 접수일이 사실상 컷오프와
-    같아져 pin이 그대로 무력화되고, 그 사이에 낀 무관한 후속 분기보고서가
-    다시 걸린다. `facts()` 가 실제로 돌려주는 행의 `rcept_dt`(그 사실을
-    낸 문서 자체)만 후보로 삼으면 미추출 정정은 애초에 후보에 없고, 사실을
-    낸 마지막 정정(또는 원본)이 그대로 최댓값이 된다.
-
-    이슈 #183 — 「카카오의 2023년 말 연결 비유동자산 중 유형자산을 최초
-    제출값과 최신 재작성값으로 나눠서 비교해줘」(EG-007)는 두 operand가
-    같은 좌표를 가리키면서 ``operand_views`` 로 「as_filed」·「restated」
-    축만 다르다(`_question_grounded_view_pair`). 그 회계연도(2023) 사업
-    보고서 계열로 좁히는 이 pin을 그대로 적용하면 restated 쪽도 2023
-    사업보고서 계열 안(원본 또는 그 정정)에 갇혀, 실제 최신 재작성값이
-    실린 **후속 연도** 사업보고서(예: 2026 사업보고서의 2023-12-31 재작성
-    비교열)를 보지 못한다 — 「최신 재작성값」은 그 정의상 코퍼스 컷오프까지
-    열어 둬야 한다.
-
-    두 operand의 as_of를 다르게 내지는 않는다 — ``FinancialComparisonResolution``
-    의 view-comparison 불변식(``agent.deterministic_plan_compiler_v1``)이
-    as_filed·restated 두 operand의 as_of가 **동일**해야 한다고 강제한다.
-    그래서 restated 축이 섞인 pair는 두 operand 모두 pin을 걸지 않고
-    코퍼스 컷오프(종전 동작)로 둔다 — 「최초 제출값」(as_filed) 쪽은 그
-    자체로 항상 **가장 이른** 사실을 고르는 view 이므로(그 안내는 view
-    선택 로직의 몫이지 여기 as_of pin의 몫이 아니다) pin 없이도 여전히
-    원본 문서를 그대로 가리킨다. 이 축이 없는 보통 질문(#149 의 CG-031)은
-    ``operand_views`` 가 ``None`` 이라 이 예외를 타지 않고 종전대로 두
-    operand 모두 그 회계연도 사업보고서 계열로 고정된다.
-    """
-
-    if (operand_views is not None
-            and len(operand_views) == len(rows)
-            and "restated" in operand_views):
-        return None
-    if not (callable(getattr(companies, "documents", None))
-            and callable(getattr(companies, "facts", None))):
-        return None
-    overrides: list[str | None] = []
-    for row in rows:
-        if (row.period_end.month != 12
-                or concept_axes(row.concept).period_semantics != "instant"):
-            overrides.append(None)
-            continue
-        own_doc_ids = {
-            document.doc_id
-            for document in companies.documents(
-                as_of=corpus_cutoff, corp_code=row.corp_code,
-                doc_group="periodic")
-            if getattr(document, "base_year", None) == row.period_end.year
-            and getattr(document, "base_month", None) == 12
-        }
-        if not own_doc_ids:
-            overrides.append(None)
-            continue
-        own_fact_rcept_dts = [
-            fact.rcept_dt
-            for fact in companies.facts(
-                row.corp_code, as_of=corpus_cutoff, concept=row.concept.value)
-            if getattr(fact, "doc_id", None) in own_doc_ids
-            and getattr(fact, "period_end", None) == row.period_end.isoformat()
-            and getattr(fact, "scope", None) == row.scope
-        ]
-        overrides.append(max(own_fact_rcept_dts) if own_fact_rcept_dts else None)
-    return tuple(overrides) if any(value is not None for value in overrides) else None
 
 
 def _parallel_annual_change_operator(
@@ -1464,11 +1342,30 @@ def _ratio_payload_for(
     }
 
 
+def _explicit_scope_subtraction_orders(question: str) -> tuple[tuple[str, str], ...]:
+    """Read literal subtraction roles, not the order of a neutral comparison."""
+
+    mentions = tuple(re.finditer(r"연결|별도|개별", question))
+    orders: set[tuple[str, str]] = set()
+    for index, (left, right) in enumerate(zip(mentions, mentions[1:])):
+        between = question[left.end():right.start()]
+        end = mentions[index + 2].start() if index + 2 < len(mentions) else len(question)
+        tail = question[right.end():end]
+        symbolic = re.search(r"[-−]\s*$", between) is not None
+        verbal = (
+            re.search(r"에서\s*$", between) is not None
+            and re.search(r"뺀|빼|차감", tail) is not None
+            and re.search(r"빼지|빼면\s*안|차감하지", tail) is None)
+        if symbolic or verbal:
+            orders.add(tuple("CFS" if mention.group() == "연결" else "SFS"
+                             for mention in (left, right)))
+    return tuple(sorted(orders))
+
+
 def _payload_for(
         rows: "tuple[FinancialCoordinate, ...]", *, as_of: str, view: str,
         question: str, operation: str, output_field_count: int,
         field_surfaces: tuple[str, ...] = (),
-        operand_as_of: "tuple[str, ...] | None" = None,
         operand_views: "tuple[str, ...] | None" = None,
         parallel_change_operator: "str | None" = None,
         verification_premise: "tuple[str, str] | None" = None,
@@ -1489,9 +1386,7 @@ def _payload_for(
     """
 
     if len(rows) == 1:
-        pinned = operand_as_of[0] if operand_as_of is not None else None
-        return rows[0].as_resolution(
-            as_of=(pinned if pinned is not None else as_of), view=view)
+        return rows[0].as_resolution(as_of=as_of, view=view)
     if len(rows) not in {2, 3, 4, 5, 6, 7, 8}:
         return None
     if operand_views is not None and len(operand_views) != len(rows):
@@ -1524,7 +1419,17 @@ def _payload_for(
             return None
     same_company = len({row.corp_code for row in rows}) == 1
     if same_company and first.scope != second.scope:
-        requested_operators = ["absolute_difference"]
+        subtraction_orders = _explicit_scope_subtraction_orders(question)
+        if subtraction_orders:
+            if (len(subtraction_orders) != 1
+                    or set(subtraction_orders[0]) != {first.scope, second.scope}):
+                return None
+            if first.scope != subtraction_orders[0][0]:
+                rows = tuple(reversed(rows))
+                effective_views = tuple(reversed(effective_views))
+            requested_operators = ["difference"]
+        else:
+            requested_operators = ["absolute_difference"]
     elif same_company and effective_views[0] != effective_views[1]:
         if operation != "compare":
             return None
@@ -1627,11 +1532,7 @@ def _payload_for(
                 "operand_id": f"operand-{position}",
                 "proof_ref": f"source-operand:operand-{position}",
                 **{k: v for k, v in row.as_resolution(
-                    as_of=(
-                        operand_as_of[position - 1]
-                        if operand_as_of is not None
-                        and operand_as_of[position - 1] is not None
-                        else as_of),
+                    as_of=as_of,
                     view=effective_views[position - 1]).items() if k != "kind"},
             }
             for position, row in enumerate(rows, start=1)

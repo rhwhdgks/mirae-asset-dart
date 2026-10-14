@@ -1036,8 +1036,15 @@ class QuestionGroundedFinancialRegrounder:
         year_ends = list(dict.fromkeys(
             match.group(0).strip() for match in re.finditer(
                 r"(?<![0-9])20[0-9]{2}\s*년(?:도)?\s*말", question)))
+        view_question = question
+        cutoff_expression = intent.answer_items[0].scope.as_of_expression
+        if cutoff_expression:
+            view_question = view_question.replace(cutoff_expression, "")
+        view_periods = year_ends or list(dict.fromkeys(
+            match.group(0).strip() for match in self._YEAR.finditer(view_question)))
         if (as_filed is not None and restated is not None
-                and comparison is not None and len(year_ends) == 1
+                and comparison is not None and len(view_periods) == 1
+                and self._INTERIM_PERIOD_TOKEN.search(view_question) is None
                 and re.search(r"전년(?:도)?|전기", question) is None
                 and self._PERCENT_DEMAND.search(question) is None):
             view_roles = sorted(
@@ -1045,7 +1052,7 @@ class QuestionGroundedFinancialRegrounder:
             return self._replace_closed_item(
                 intent, company_surface=company,
                 concept_surface=concept_surface, operation="compare",
-                periods=year_ends, qualifiers=view_roles,
+                periods=view_periods, qualifiers=view_roles,
                 output_shape="comparison",
                 field_surfaces=[
                     as_filed.group(0), restated.group(0), comparison.group(0)],
@@ -3293,6 +3300,12 @@ class ClosedFinancialComparisonRegrounder:
         filing_spans = ([match.span()
                          for match in self._FILING_DATE_PHRASE.finditer(question)]
                         if current else [])
+        # An explicit observation cutoff can accompany several target years.
+        # Its year is never another accounting operand.
+        if current and item.scope.as_of_expression:
+            filing_spans.extend(
+                match.span() for match in re.finditer(
+                    re.escape(item.scope.as_of_expression), question))
         periods = list(dict.fromkeys(
             match.group(0).strip()
             for match in self._PERIOD.finditer(question)
@@ -3711,6 +3724,27 @@ class ClosedFinancialRelationRegrounder:
     _YEAR = re.compile(r"(?<![0-9])(?:20)?[0-9]{2}\s*년(?:도)?")
     _YOY = re.compile(r"전년비\s*몇\s*퍼(?:센트)?")
 
+    @classmethod
+    def _literal_scope_subtraction(cls, question: str):
+        """Return one literal same-metric subtraction, never an inferred sign."""
+        from .stage1_v1_financial_backend import _explicit_scope_subtraction_orders
+
+        orders = _explicit_scope_subtraction_orders(question)
+        if len(orders) != 1 or set(orders[0]) != {"CFS", "SFS"}:
+            return None
+        metrics = list(cls._METRIC.finditer(question))
+        concepts = {resolve_metric_concept(row.group(0)) for row in metrics}
+        if len(concepts) != 1 or None in concepts or not metrics:
+            return None
+        metric = re.escape(metrics[0].group(0))
+        scope = r"(?:연결|별도|개별)\s*(?:기준\s*)?"
+        pattern = re.compile(
+            rf"{scope}{metric}\s*(?:[-−]\s*{scope}{metric}"
+            rf"|에서\s*{scope}{metric}(?:을|를)?\s*"
+            r"(?:뺀\s*(?:값|차이)?|차감한\s*(?:값|차이)))")
+        matches = list(pattern.finditer(question))
+        return matches[0] if len(matches) == 1 else None
+
     @staticmethod
     def _question_company_ids(
             payload: dict[str, Any], question: str,
@@ -3741,7 +3775,7 @@ class ClosedFinancialRelationRegrounder:
         compact = re.sub(r"[^0-9A-Za-z가-힣]", "", remainder)
         compact = re.sub(
             r"(?:연결|별도|개별|절대|차이|격차|값|금액|결과|계산|"
-            r"얼마|알려줘?|구해줘?|[과와의을를])", "", compact)
+            r"부호를유지해서|에서|차감한|뺀|얼마|알려줘?|구해줘?|[과와의을를])", "", compact)
         if not compact:
             return True
         # A literal demand copied from the closed question is also harmless.
@@ -3773,7 +3807,8 @@ class ClosedFinancialRelationRegrounder:
         metric_concepts = {
             resolve_metric_concept(match.group(0)) for match in metric_matches}
         metric_concepts.discard(None)
-        difference = re.search(r"(?:절대\s*)?(?:차이|격차)", question)
+        difference = (self._literal_scope_subtraction(question)
+                      or re.search(r"(?:절대\s*)?(?:차이|격차)", question))
         if (len(companies) != 1 or len(years) != 1
                 or len(metric_concepts) != 1 or not metric_matches
                 or difference is None):
