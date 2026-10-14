@@ -26,9 +26,9 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -83,9 +83,12 @@ def _clarification_headers(meta: dict) -> dict[str, str]:
     }
 
 
-def _official_response(result: AnswerResult) -> JSONResponse:
+def _official_response(result: AnswerResult, *, request_id: str | None = None) -> JSONResponse:
+    headers = _clarification_headers(result.meta)
+    if request_id is not None:
+        headers["X-Request-ID"] = request_id
     return JSONResponse(result.response, status_code=result.http_status,
-                        headers=_clarification_headers(result.meta))
+                        headers=headers)
 
 
 _RESUME_MESSAGES = {
@@ -149,8 +152,17 @@ def create_app(runtime: ServerRuntime | None = None, *, autostart: bool = True) 
 
     @app.get("/answer", tags=["official"],
              summary="공식 평가 엔드포인트 — 5필드 (question_id · question · retrieved_context · think_trace · answer)")
-    def answer(question_id: str = Query(default=""), question: str = Query(default="")):
+    def answer(question_id: str = Query(default=""), question: str = Query(default=""),
+               live_attempt_id: str | None = Header(default=None, alias="X-Live-Attempt-ID")):
         req_id = str(uuid4()); started = time.time()
+        # A caller-generated UUID binds even client timeouts to later server logs.
+        # Never retain an arbitrary header value or change the five-field body.
+        correlation = {}
+        if live_attempt_id is not None and len(live_attempt_id) == 36:
+            try:
+                correlation["client_attempt_id"] = str(UUID(live_attempt_id))
+            except ValueError:
+                pass
         if not question_id.strip() or not question.strip():
             # 주최 계약은 5필드 고정이다. 파라미터가 비어도 오류 봉투 대신 한계 고지로
             # 5필드를 돌려준다(무응답 금지와 같은 원칙).
@@ -158,15 +170,16 @@ def create_app(runtime: ServerRuntime | None = None, *, autostart: bool = True) 
                 limit_response(question_id, question, MSG_MISSING_PARAMS, ""),
                 "unresolved", 200, meta={"final_status": "unresolved", "missing_params": True})
             rt.log({"req_id": req_id, "endpoint": "/answer", "question_id": question_id,
-                    "question": question, "status": "invalid_params", "elapsed": 0.0})
-            return _official_response(result)
+                    "question": question, "status": "invalid_params", "elapsed": 0.0, **correlation})
+            return _official_response(result, request_id=req_id)
         result = rt.answer(question_id, question)
         elapsed = round(time.time() - started, 3)
         rt.log({"req_id": req_id, "endpoint": "/answer", "question_id": question_id, "question": question,
                 "status": result.status, "elapsed": elapsed, **result.meta,
+                **correlation,
                 "answer_len": len(result.response.get("answer", "")),
                 "trace_lines": result.response.get("think_trace", "").count("\n") + 1})
-        return _official_response(result)
+        return _official_response(result, request_id=req_id)
 
     @app.post("/answer/resume", tags=["official"],
               summary="역질문 재개 — 열린 native 세션에 typed 답을 적용하고 다음 turn/확정 답변을 5필드로")

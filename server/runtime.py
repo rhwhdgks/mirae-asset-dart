@@ -43,6 +43,7 @@ from app.runtime_deadline import (
     request_deadline,
 )
 from server.stage1 import ChainedStage1, Stage1Resolution, Stage1Unavailable
+from src.code_identity import code_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE_NAME = "DART Disclosure Agent"
@@ -342,6 +343,8 @@ class ServerRuntime:
         self.clarification_db_path = Path(clarification_db_path or
                                           ROOT / "out" / "serving" / "stage1_v1_clarifications.sqlite3")
         self.started_at = datetime.now(timezone.utc)
+        # Pin process-start identity, not whichever branch HEAD has at request time.
+        self.code_identity = code_identity(ROOT)
         self.ready = False
         self.error: str | None = None
         # 컴포넌트 (install 에서 채움)
@@ -478,6 +481,8 @@ class ServerRuntime:
         si = getattr(self.backend, "search_index", None)
         composer = getattr(self.pipeline, "composer", None)
         return {"canonical_build_id": self.canonical.get("build_id"), "schema": self.canonical.get("schema_version"),
+                "latency_capture": os.getenv("ANSWER_CAPTURE_LATENCY", "0") == "1",
+                "code_identity": getattr(self, "code_identity", None),
                 "warmup_s": self.warm.get("seconds"),
                 "search_index": getattr(si, "index_build_id", None),
                 "hcx_composer": bool(composer.enabled) if composer is not None else False,
