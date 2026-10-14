@@ -10,10 +10,12 @@ attempt.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
 import time
+from uuid import uuid4
 
 import httpx
 
@@ -35,39 +37,60 @@ def questions(path: Path) -> list[tuple[str, str]]:
 def invoke(
         client: httpx.Client, base_url: str, question_id: str, question: str,
         *, retry_503: int, retry_wait_s: float,
+        capture_diagnostics: bool = False,
         ) -> dict:
     attempts: list[dict] = []
+    call_started = time.monotonic()
+    call_started_at = datetime.now(timezone.utc).isoformat()
+
+    def finish(row: dict) -> dict:
+        if capture_diagnostics:
+            row.update(started_at=call_started_at,
+                       finished_at=datetime.now(timezone.utc).isoformat(),
+                       total_elapsed=round(time.monotonic() - call_started, 3))
+        return row
+
     for attempt in range(1, retry_503 + 2):
         started = time.monotonic()
+        diagnostic = ({"started_at": datetime.now(timezone.utc).isoformat(),
+                       "client_attempt_id": str(uuid4())}
+                      if capture_diagnostics else {})
         try:
+            kwargs = ({"headers": {"X-Live-Attempt-ID": diagnostic["client_attempt_id"]}}
+                      if capture_diagnostics else {})
             response = client.get(
                 f"{base_url.rstrip('/')}/answer",
-                params={"question_id": question_id, "question": question})
+                params={"question_id": question_id, "question": question}, **kwargs)
             elapsed = round(time.monotonic() - started, 3)
+            if capture_diagnostics:
+                diagnostic.update(finished_at=datetime.now(timezone.utc).isoformat(),
+                                  server_request_id=response.headers.get("X-Request-ID"))
             try:
                 body = response.json()
             except Exception:  # noqa: BLE001 - preserve non-JSON server body
                 body = {"raw_body": response.text}
             attempts.append({"attempt": attempt, "http": response.status_code,
-                             "elapsed": elapsed, "response": body})
+                             "elapsed": elapsed, "response": body, **diagnostic})
             if response.status_code != 503 or attempt > retry_503:
-                return {
+                return finish({
                     "question_id": question_id, "question": question,
                     "http": response.status_code, "elapsed": elapsed,
                     "attempt_count": attempt, "attempts": attempts,
                     "response": body, "error": None,
-                }
+                })
         except Exception as exc:  # noqa: BLE001 - transport evidence is output
             elapsed = round(time.monotonic() - started, 3)
+            if capture_diagnostics:
+                diagnostic["finished_at"] = datetime.now(timezone.utc).isoformat()
             attempts.append({"attempt": attempt, "http": None, "elapsed": elapsed,
-                             "error": f"{type(exc).__name__}: {exc}"})
+                             "error": f"{type(exc).__name__}: {exc}", **diagnostic})
             if attempt > retry_503:
-                return {
+                return finish({
                     "question_id": question_id, "question": question,
                     "http": None, "elapsed": elapsed,
                     "attempt_count": attempt, "attempts": attempts,
                     "response": None, "error": attempts[-1]["error"],
-                }
+                })
         time.sleep(retry_wait_s)
     raise AssertionError("unreachable")
 
