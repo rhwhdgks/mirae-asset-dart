@@ -61,11 +61,14 @@ class CanonicalLifecycleLike(Protocol):
 def is_literal_termination_filing_observation(item: Any) -> bool:
     """A literal filing target with generic existence/observation output."""
     fields = [re.sub(r"\s+", "", value) for value in item.output.field_surfaces]
+    target = re.sub(r"\s+", "", item.target.surface)
     return bool(
-        fields and all(value in {"확인된것", "여부", "유무", "확인여부", "공시여부"}
-                       for value in fields)
+        fields and all(
+            value in {"확인된것", "여부", "유무", "확인여부", "공시여부"}
+            or re.fullmatch(re.escape(target) + r"(?:확인|관측|존재)?(?:여부|유무)?", value)
+            for value in fields)
         and re.fullmatch(r"(?:해지|종료)(?:[·ㆍ/](?:해지|종료))?공시",
-                         re.sub(r"\s+", "", item.target.surface)))
+                         target))
 
 
 LifecycleStatus = Literal["resolved", "ambiguous_same_day", "ambiguous_event"]
