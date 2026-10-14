@@ -7,7 +7,8 @@ import pytest
 from app.composer.template import (
     TemplateComposer, _contract_event_listing_table, _event_qualification_notes,
 )
-from app.orchestrator.payload import AnswerClaim, AnswerPayload, Limitation
+from app.composer.hcx import HcxComposer
+from app.orchestrator.payload import AnswerClaim, AnswerPayload, ClaimCitation, Limitation
 from app.tools.events import EventCandidate, EventTool
 
 CORP = "00000001"
@@ -207,3 +208,28 @@ def test_missing_original_conclusion_leads_an_identification_question_once():
     assert answer.startswith("제공된 자료보다 앞선 원공시가 없어")
     assert answer.count("이전 변경 이력은 확인할 수 없습니다") == 1
     assert "원공시가 제공된 코퍼스보다 앞서 제출되어" not in answer
+
+
+def test_negative_filing_observation_cannot_lose_its_corpus_boundary_to_wording():
+    class _NoWording:
+        cfg = NS(enabled=True)
+
+        def generate(self, *_args, **_kwargs):
+            raise AssertionError("bounded observation must not be freely reworded")
+
+    payload = AnswerPayload(
+        question_id="generic-observation", handoff_id="offline", final_status="answer",
+        claims=[AnswerClaim(
+            output_id="state@20260619", label="가상 계약의 해지·종료 공시 관측 여부",
+            state="no_termination_observed",
+            text=("제공된 공시 자료에서는 기준일까지 해지·종료 공시가 확인되지 "
+                  "않았습니다. 이는 계약의 법적 유효성을 뜻하지 않습니다."),
+            citations=[ClaimCitation(
+                doc_id="exchange_" + ORIGINAL, rcept_no=ORIGINAL,
+                locator="document", verification="source_roundtrip",
+                excerpt_prompt_safe="가상 공급계약 공시")],
+        )])
+    answer = HcxComposer(client=_NoWording()).compose(
+        payload, question="가상 공급계약에 해지 공시가 나왔어?")
+    assert "제공된 공시 자료" in answer
+    assert "법적 유효성을 뜻하지 않습니다" in answer

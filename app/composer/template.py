@@ -1784,10 +1784,10 @@ def _document_versions_at_requested_dates(payload, question: str | None) -> str 
             or not re.search(r"버전|유효|원본|정정본", question)):
         return None
     from agent.date_surface import question_date_surfaces
-    days = list(dict.fromkeys(
+    days = sorted({
         f"{year:04d}{month:02d}{day:02d}"
         for year, month, day in question_date_surfaces(question)
-        if month is not None and day is not None))
+        if month is not None and day is not None})
     if len(days) < 2:
         return None
     intervals = []

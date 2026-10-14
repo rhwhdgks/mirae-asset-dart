@@ -170,6 +170,7 @@ def test_parallel_query_dates_select_their_own_proved_effective_versions():
         "가상회사의 2024년 반기보고서는 2024년 9월 25일과 26일 기준으로 어떤 버전이야?")
     assert "| 2024-09-25 | 20240813900001 |" in answer
     assert "| 2024-09-26 | 20240926900002 |" in answer
+    assert answer.index("2024-09-25") < answer.index("2024-09-26")
 
 
 @pytest.mark.parametrize("question", [

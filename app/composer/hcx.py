@@ -484,6 +484,16 @@ class HcxComposer:
                 or _document_versions_at_requested_dates(payload, question) is not None):
             _t("template composer (typed event collection boundary)")
             return template
+        if (payload.claims
+                and all(claim.state in {"no_termination_observed", "termination_observed"}
+                        for claim in payload.claims)
+                and any(claim.state == "no_termination_observed"
+                        for claim in payload.claims)):
+            # An observed absence within the supplied corpus is not proof
+            # that no filing exists anywhere, or that the contract is valid.
+            # Keep the tool's explicit scope and legal-status boundary.
+            _t("template composer (bounded termination observation)")
+            return template
         # A complete two-period arithmetic topology should not be re-bound to
         # relative-year words by a free wording pass.  The template keeps the
         # exact operand labels, signed delta and percent direction together.
